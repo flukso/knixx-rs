@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+knixx-bus = { path = "../../crates/knixx-bus" }
+knixx-cli = { path = "../../crates/knixx-cli" }
+knixx-console = { path = "../../crates/knixx-console" }
+knixx-device = { path = "../../crates/knixx-device" }
+knixx-ui = { path = "../../crates/knixx-ui" }
 cortex-m = "0.7.10"
 cortex-m-rt = { version = "0.7.7", features = ["set-vtor"] }
 embassy-executor = { version = "0.10.0", features = ["platform-cortex-m", "executor-thread"] }

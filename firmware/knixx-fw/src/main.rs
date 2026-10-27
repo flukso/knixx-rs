@@ -7,13 +7,17 @@ use embassy_nrf::gpio::{Level, Output, OutputDrive};
 use embassy_nrf::interrupt::{self, InterruptExt, Priority};
 use embassy_nrf::rng::{self, Rng};
 use embassy_nrf::{bind_interrupts, peripherals, usb};
+use knixx_device::config;
+use knixx_ui::led::Mode;
 use nrf_mpsl::MultiprotocolServiceLayer;
 use static_cell::StaticCell;
 
 mod ble;
 mod boot;
 mod console;
+mod leds;
 mod panic;
+mod switches;
 mod usbcdc;
 
 // MPSL takes the radio, its timers and the clock interrupt; USB's VBUS
@@ -41,9 +45,15 @@ async fn main(spawner: Spawner) {
     let p = embassy_nrf::init(config);
     interrupt::USBD.set_priority(Priority::P3);
     interrupt::RNG.set_priority(Priority::P3);
+    interrupt::PWM0.set_priority(Priority::P3);
 
-    // The red LED stays off: it is for errors later on.
+    // The red LED stays off: the status LEDs show errors.
     let _led = Output::new(p.P1_15, Level::Low, OutputDrive::Standard);
+    spawner.spawn(leds::task(p.PWM0, p.P0_28).unwrap());
+    leds::signal(Mode::Init);
+
+    // The built-in configuration, until storage follows.
+    console::DEVICE.lock(|d| d.set(config::parse(config::DEFAULT).ok()));
 
     let mpsl_p = nrf_mpsl::Peripherals::new(p.RTC0, p.TIMER0, p.TEMP, p.PPI_CH19, p.PPI_CH30, p.PPI_CH31);
     static MPSL: StaticCell<MultiprotocolServiceLayer> = StaticCell::new();
@@ -56,6 +66,11 @@ async fn main(spawner: Spawner) {
     let (rx, tx) = usbcdc::start(&spawner, p.USBD, Irqs);
     spawner.spawn(usbcdc::tx_task(tx).unwrap());
     spawner.spawn(console::task(rx).unwrap());
+
+    switches::start(
+        &spawner,
+        [p.P0_26.into(), p.P0_27.into(), p.P0_04.into(), p.P0_05.into()],
+    );
 
     static RNG: StaticCell<Rng<'static, embassy_nrf::mode::Async>> = StaticCell::new();
     let rng = RNG.init(Rng::new(p.RNG, Irqs));

@@ -92,12 +92,37 @@ The board advertises as `knixx`; `bolt scan` looks for it.
 The USB serial port carries the console, as with the Go firmware: the
 banner on the first key, then commands after the `>>> ` prompt.
 
+Lines are edited as with the Go firmware: backspace, and a history of 8
+lines on the up and down arrows or Ctrl-P and Ctrl-N. Output that does not
+fit the 2 KiB queue of the port is dropped whole and noted as
+`[N bytes of output dropped]` once the host catches up.
+
 | Command | |
 |---|---|
+| `switch <A\|B> <on\|off>` | switch the lights of a wall switch |
+| `sniff [on\|off]` | show or set the trace of the bus |
+| `stat` | report the transceiver's state and system status |
+| `config [dump\|init\|get <key>\|set <key> <value>...]` | the configuration |
 | `version` | the commit and build time: `version <commit> built <date>` |
 | `sys` | uptime, the USB output queue, USB DTR |
 | `ota` | reboot into the bootloader for a BLE firmware update |
 | `help` | the commands |
+
+The configuration is the built-in default until storage follows; the bus
+commands queue for the bus task that follows.
+
+## LEDs and switches
+
+The two WS2812B status LEDs on A3 (P0.28) run from PWM0 and EasyDMA, not
+bit-banging, which the BLE controller's timing does not allow. LED1 blinks
+yellow while the board starts, red on an error and green on motion; LED2
+blinks blue while the BLE console is on.
+
+The wall switch contacts, A on/off (D9, D10) and B on/off (A0, A1), are
+active low with the internal pull-ups and debounced in software: a press
+counts once the contact stayed closed for 30 ms, and again only after it
+stayed open for 30 ms. Each press switches the lights as the `switch`
+command does.
 
 A panic resets the board; its message survives the reset in RAM and the
 next banner shows it as `last panic: ...`.

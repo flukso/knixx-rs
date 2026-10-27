@@ -1,0 +1,9 @@
+[package]
+name = "knixx-ui"
+version = "0.1.0"
+description = "The status LED player and the wall switch logic"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+embassy-time = "0.5"

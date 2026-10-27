@@ -1,0 +1,9 @@
+[package]
+name = "knixx-device"
+version = "0.1.0"
+description = "The knixx Thunder device model and its INI configuration"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+knixx-knx = { path = "../knixx-knx" }

@@ -1,0 +1,9 @@
+[package]
+name = "knixx-sensors"
+version = "0.1.0"
+description = "Drivers for the SHT2x and VCNL4040 sensors"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+embedded-hal-async = "1"

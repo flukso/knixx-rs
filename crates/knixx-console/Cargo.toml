@@ -1,0 +1,9 @@
+[package]
+name = "knixx-console"
+version = "0.1.0"
+description = "The console's line editor, output queues and BLE NUS framing"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+

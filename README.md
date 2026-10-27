@@ -107,6 +107,14 @@ next banner shows it as `last panic: ...`.
 | Path | Contents |
 |---|---|
 | `firmware/` | the firmware workspace, built for the nRF52840 |
+| `crates/knixx-knx` | TP1 frames, individual and group addresses, DPT 1.001/1.018 |
+| `crates/knixx-ncn` | the NCN5121 transceiver's host protocol: requests, the indication parser, their descriptions |
+| `crates/knixx-device` | the device model (switches, sensor and occupancy groups, ToF settings) and its INI configuration |
+| `crates/knixx-bus` | the bus engine: sending with confirmations, stat, occupancy, the sniffer; sans-IO, with an async runner |
+| `crates/knixx-cli` | the shared console commands: switch, sniff, stat, config |
+| `crates/knixx-console` | the line editor, the console output queues and the BLE NUS framing |
+| `crates/knixx-ui` | the status LED player and the wall switch logic |
+| `crates/knixx-sensors` | async SHT2x and VCNL4040 drivers on embedded-hal |
 | `host/knixx-host` | host library: firmware images (ELF to UF2, Intel HEX, binary), UF2 files, the bootloader's drive, the USB serial port, flashing, BLE scanning |
 | `host/bolt` | host tool: `bolt convert`, `bolt uf2`, `bolt scan` |
 | `xtask/` | `cargo xtask` tasks |
@@ -117,7 +125,9 @@ next banner shows it as `last panic: ...`.
 cargo test
 ```
 
-runs the host tests. `cargo clippy --all-targets` and, in `firmware/`,
+runs the host tests, among them the tests of the Go packages the crates
+port. The crates in `crates/` are `no_std` without `alloc`: the firmware
+links no allocator, so nothing in it can use the heap. `cargo clippy --all-targets` and, in `firmware/`,
 `cargo clippy --release` lint the two workspaces.
 
 ## License

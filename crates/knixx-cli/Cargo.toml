@@ -1,0 +1,13 @@
+[package]
+name = "knixx-cli"
+version = "0.1.0"
+description = "The console commands shared by the firmware and the host shell"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+knixx-device = { path = "../knixx-device" }
+knixx-bus = { path = "../knixx-bus" }
+
+[dev-dependencies]
+knixx-console = { path = "../knixx-console" }

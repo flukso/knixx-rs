@@ -1,0 +1,9 @@
+[package]
+name = "knixx-knx"
+version = "0.1.0"
+description = "KNX TP1 frames, addresses and the DPTs knixx uses"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+

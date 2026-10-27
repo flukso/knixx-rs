@@ -1,0 +1,15 @@
+[package]
+name = "knixx-bus"
+version = "0.1.0"
+description = "The KNX bus engine: sending, confirmations, occupancy and the sniffer"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+knixx-knx = { path = "../knixx-knx" }
+knixx-ncn = { path = "../knixx-ncn" }
+knixx-device = { path = "../knixx-device" }
+embassy-time = "0.5"
+embassy-sync = "0.8"
+embassy-futures = "0.1"
+embedded-io-async = "0.7"

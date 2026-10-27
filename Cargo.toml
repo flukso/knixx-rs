@@ -3,7 +3,7 @@
 # for the nRF52840.
 [workspace]
 resolver = "3"
-members = ["host/knixx-host", "host/bolt", "xtask"]
+members = ["crates/*", "host/knixx-host", "host/bolt", "xtask"]
 exclude = ["firmware"]
 
 [workspace.package]

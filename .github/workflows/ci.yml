@@ -23,6 +23,8 @@ jobs:
         run: |
           cargo fmt --check
           (cd firmware && cargo fmt --check)
+      - name: no_std crates
+        run: for c in crates/*; do (cd $c && cargo build --target thumbv7em-none-eabihf) || exit 1; done
       - name: Firmware build and size
         run: cargo xtask build
       - name: Licenses

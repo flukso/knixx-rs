@@ -1,0 +1,9 @@
+[package]
+name = "knixx-ncn"
+version = "0.1.0"
+description = "The host protocol of the onsemi NCN5121 KNX transceiver"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+

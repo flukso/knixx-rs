@@ -1,0 +1,12 @@
+# The host workspace: the shared no_std crates (tested on the host), the host
+# tools and xtask. The firmware is a workspace of its own in firmware/, built
+# for the nRF52840.
+[workspace]
+resolver = "3"
+members = ["host/knixx-host", "host/bolt", "xtask"]
+exclude = ["firmware"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/flukso/knixx-rs"

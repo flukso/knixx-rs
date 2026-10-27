@@ -1,0 +1,31 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: rustup show
+      - name: flip-link
+        run: cargo install flip-link --locked
+      - name: Host tests
+        run: cargo test
+      - name: Lint
+        run: |
+          cargo clippy --all-targets -- -D warnings
+          (cd firmware && cargo clippy --release -- -D warnings)
+      - name: Format
+        run: |
+          cargo fmt --check
+          (cd firmware && cargo fmt --check)
+      - name: Firmware build and size
+        run: cargo xtask build
+      - name: Licenses
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses

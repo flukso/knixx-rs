@@ -1,0 +1,10 @@
+[package]
+name = "knixx-host"
+version = "0.1.0"
+description = "Host-side support for knixx boards: firmware images and flashing"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+object = { version = "0.36", default-features = false, features = ["read_core", "elf", "std"] }
+thiserror = "2"

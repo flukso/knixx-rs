@@ -1,0 +1,17 @@
+# The firmware workspace, built for the nRF52840 (see .cargo/config.toml).
+# The host workspace at the repository root holds the shared no_std crates,
+# the host tools and xtask.
+[workspace]
+resolver = "3"
+members = ["knixx-fw"]
+
+[profile.release]
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+debug = 2
+panic = "abort"
+
+[profile.dev]
+opt-level = "s"
+panic = "abort"

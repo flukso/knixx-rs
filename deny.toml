@@ -1,0 +1,18 @@
+# cargo deny check: the firmware and the host tools stay MIT-licensed, so no
+# copyleft dependencies (metaneutrons/knx-rs is GPL-3.0: reference only).
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "MPL-2.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "allow"

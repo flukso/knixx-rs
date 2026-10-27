@@ -1,0 +1,11 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+description = "Build, flash and test tasks: cargo xtask <task>"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+knixx-host = { path = "../host/knixx-host" }
+anyhow = "1"

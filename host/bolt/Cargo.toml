@@ -9,3 +9,4 @@ license.workspace = true
 knixx-host = { path = "../knixx-host" }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
+tokio = { version = "1", features = ["rt", "time"] }

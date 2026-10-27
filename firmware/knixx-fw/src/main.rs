@@ -4,29 +4,66 @@
 
 use embassy_executor::Spawner;
 use embassy_nrf::gpio::{Level, Output, OutputDrive};
+use embassy_nrf::interrupt::{self, InterruptExt, Priority};
+use embassy_nrf::rng::{self, Rng};
 use embassy_nrf::{bind_interrupts, peripherals, usb};
+use nrf_mpsl::MultiprotocolServiceLayer;
+use static_cell::StaticCell;
 
+mod ble;
 mod boot;
 mod console;
 mod panic;
 mod usbcdc;
 
+// MPSL takes the radio, its timers and the clock interrupt; USB's VBUS
+// detection shares the clock interrupt with it.
 bind_interrupts!(struct Irqs {
     USBD => usb::InterruptHandler<peripherals::USBD>;
-    CLOCK_POWER => usb::vbus_detect::InterruptHandler;
+    CLOCK_POWER => nrf_mpsl::ClockInterruptHandler, usb::vbus_detect::InterruptHandler;
+    RNG => rng::InterruptHandler<peripherals::RNG>;
+    EGU0_SWI0 => nrf_mpsl::LowPrioInterruptHandler;
+    RADIO => nrf_mpsl::HighPrioInterruptHandler;
+    TIMER0 => nrf_mpsl::HighPrioInterruptHandler;
+    RTC0 => nrf_mpsl::HighPrioInterruptHandler;
 });
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
+    boot::sanitize();
+
+    // Interrupt priorities: MPSL keeps P0 (radio, its timers) and P1 to
+    // itself and runs its clock and low-priority work at P4. The rest of the
+    // application stays at P2 and P3.
     let mut config = embassy_nrf::config::Config::default();
-    // USB needs the crystal oscillator.
-    config.hfclk_source = embassy_nrf::config::HfclkSource::ExternalXtal;
+    config.time_interrupt_priority = Priority::P2;
+    config.gpiote_interrupt_priority = Priority::P3;
     let p = embassy_nrf::init(config);
+    interrupt::USBD.set_priority(Priority::P3);
+    interrupt::RNG.set_priority(Priority::P3);
 
     // The red LED stays off: it is for errors later on.
     let _led = Output::new(p.P1_15, Level::Low, OutputDrive::Standard);
 
+    let mpsl_p = nrf_mpsl::Peripherals::new(p.RTC0, p.TIMER0, p.TEMP, p.PPI_CH19, p.PPI_CH30, p.PPI_CH31);
+    static MPSL: StaticCell<MultiprotocolServiceLayer> = StaticCell::new();
+    let mpsl = MPSL.init(MultiprotocolServiceLayer::new(mpsl_p, Irqs, ble::lfclk()).expect("mpsl"));
+    spawner.spawn(ble::mpsl_task(mpsl).unwrap());
+
+    // USB runs on the crystal oscillator, which MPSL owns: hold it for good.
+    core::mem::forget(mpsl.request_hfclk().await.expect("hfclk"));
+
     let (rx, tx) = usbcdc::start(&spawner, p.USBD, Irqs);
     spawner.spawn(usbcdc::tx_task(tx).unwrap());
     spawner.spawn(console::task(rx).unwrap());
+
+    static RNG: StaticCell<Rng<'static, embassy_nrf::mode::Async>> = StaticCell::new();
+    let rng = RNG.init(Rng::new(p.RNG, Irqs));
+    let sdc_p = nrf_sdc::Peripherals::new(
+        p.PPI_CH17, p.PPI_CH18, p.PPI_CH20, p.PPI_CH21, p.PPI_CH22, p.PPI_CH23, p.PPI_CH24, p.PPI_CH25,
+        p.PPI_CH26, p.PPI_CH27, p.PPI_CH28, p.PPI_CH29,
+    );
+    ble::start(&spawner, sdc_p, rng, mpsl);
+
+    boot::check_priorities();
 }

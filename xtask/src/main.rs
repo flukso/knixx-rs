@@ -2,6 +2,7 @@
 //!
 //!     build   build the firmware and write build/knixx.{elf,uf2,hex}
 //!     flash   build, flash over USB and check the board runs the build
+//!     cycle   build, then flash n times, checking USB and BLE after each
 //!
 //! The firmware is built in firmware/, a workspace of its own for the
 //! nRF52840, stamped with the git commit and the build time.
@@ -14,7 +15,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use knixx_host::image::Image;
-use knixx_host::{flash, uf2};
+use knixx_host::{blescan, flash, uf2};
 
 /// Where the application may go: from the end of the S140 6.1.1 SoftDevice
 /// to the start of the user data that precedes the bootloader.
@@ -27,6 +28,8 @@ tasks:
   build   build the firmware and write build/knixx.{elf,uf2,hex}
   flash   build, flash over USB and check the board runs the build
           [--port <serial port>]
+  cycle   build, then flash <n> times; after each flash the board must
+          report its version over USB and advertise as knixx over BLE
 ";
 
 fn main() -> Result<()> {
@@ -34,6 +37,7 @@ fn main() -> Result<()> {
     match args.first().map(String::as_str) {
         Some("build") => build().map(|_| ()),
         Some("flash") => flash(&args[1..]),
+        Some("cycle") => cycle(&args[1..]),
         Some("help" | "-h" | "--help") | None => {
             eprint!("{USAGE}");
             Ok(())
@@ -161,6 +165,40 @@ fn flash(args: &[String]) -> Result<()> {
         wait: Duration::from_secs(20),
     })
     .map_err(anyhow::Error::msg)
+}
+
+/// Builds once, then flashes n times. After each flash the board must
+/// report the version over USB and advertise over BLE: every flash ends in
+/// the bootloader jumping to the application without a reset, the path on
+/// which USB and the BLE controller can hang (nrf-sdc issue #103).
+fn cycle(args: &[String]) -> Result<()> {
+    let n: u32 = match args {
+        [n] => n.parse().context("cycle count")?,
+        _ => bail!("usage: cargo xtask cycle <n>"),
+    };
+    let (uf2, v) = build()?;
+    let expect = format!("version {} built {}", v.commit, v.date);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let adapter = rt.block_on(blescan::adapter()).map_err(anyhow::Error::msg)?;
+    for i in 1..=n {
+        eprintln!("--- cycle {i} of {n}");
+        flash::uf2(flash::Options {
+            file: &uf2,
+            port: None,
+            volume: flash::VOLUME,
+            expect: Some(expect.clone()),
+            wait: Duration::from_secs(20),
+        })
+        .map_err(|e| anyhow::anyhow!("cycle {i}: usb: {e} ({} passed)", i - 1))?;
+        let f = rt
+            .block_on(blescan::find(&adapter, "knixx", "", Duration::from_secs(10)))
+            .map_err(|e| anyhow::anyhow!("cycle {i}: ble: {e} ({} passed)", i - 1))?;
+        eprintln!("advertising: {} rssi {:?}", f.id, f.rssi);
+    }
+    eprintln!("all {n} cycles passed");
+    Ok(())
 }
 
 #[cfg(test)]

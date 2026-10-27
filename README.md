@@ -63,6 +63,30 @@ the version line.
 macOS must allow the terminal to write to removable volumes (System
 Settings, Privacy & Security, Files & Folders).
 
+```
+cargo xtask cycle <n>
+```
+
+builds once, then flashes `n` times; after each flash the board must report
+its version over USB and advertise over BLE. Every flash ends with the
+bootloader jumping to the application without a reset, the path on which
+USB and the BLE controller can hang.
+
+## Bluetooth
+
+The firmware runs Nordic's SoftDevice Controller
+([nrf-sdc](https://github.com/alexmoon/nrf-sdc)), linked into the
+application, under the [trouble](https://github.com/embassy-rs/trouble) BLE
+host. The S140 SoftDevice in flash is never enabled; the bootloader still
+uses it for BLE firmware updates. The multiprotocol service layer (MPSL)
+runs from boot and owns the clocks, so USB gets its crystal clock through
+it. It keeps interrupt priorities P0 and P1 to itself: the application's
+interrupts run at P2 and P3, which the firmware checks at boot. Before
+anything else, `main` clears the POWER and CLOCK state that the bootloader
+leaves when it jumps to the application (nrf-sdc issue #103).
+
+The board advertises as `knixx`; `bolt scan` looks for it.
+
 ## Console
 
 The USB serial port carries the console, as with the Go firmware: the
@@ -83,8 +107,8 @@ next banner shows it as `last panic: ...`.
 | Path | Contents |
 |---|---|
 | `firmware/` | the firmware workspace, built for the nRF52840 |
-| `host/knixx-host` | host library: firmware images (ELF to UF2, Intel HEX, binary), UF2 files, the bootloader's drive, the USB serial port, flashing |
-| `host/bolt` | host tool: `bolt convert`, `bolt uf2` |
+| `host/knixx-host` | host library: firmware images (ELF to UF2, Intel HEX, binary), UF2 files, the bootloader's drive, the USB serial port, flashing, BLE scanning |
+| `host/bolt` | host tool: `bolt convert`, `bolt uf2`, `bolt scan` |
 | `xtask/` | `cargo xtask` tasks |
 
 ## Tests

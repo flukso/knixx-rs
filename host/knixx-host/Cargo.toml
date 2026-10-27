@@ -10,3 +10,6 @@ object = { version = "0.36", default-features = false, features = ["read_core", 
 thiserror = "2"
 # Without libudev: Linux ports are found through sysfs instead.
 serialport = { version = "4", default-features = false }
+btleplug = "0.13.5"
+tokio = { version = "1.54.1", features = ["rt", "time", "macros"] }
+futures-util = "0.3.34"

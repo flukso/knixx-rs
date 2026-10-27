@@ -9,3 +9,4 @@ publish = false
 [dependencies]
 knixx-host = { path = "../host/knixx-host" }
 anyhow = "1"
+tokio = { version = "1", features = ["rt", "time"] }

@@ -2,6 +2,7 @@
 //!
 //!     bolt convert  turn the firmware ELF into UF2, Intel HEX or a binary
 //!     bolt uf2      flash a UF2 file over USB through the UF2 bootloader
+//!     bolt scan     look for a board's BLE advertising
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -10,7 +11,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use knixx_host::image::Image;
-use knixx_host::{flash, uf2};
+use knixx_host::{blescan, flash, uf2};
 
 #[derive(Parser)]
 #[command(version, about = "Host tool for knixx boards")]
@@ -54,6 +55,19 @@ enum Cmd {
         #[arg(long, default_value_t = 20)]
         wait: u64,
     },
+    /// Look for a board's BLE advertising, by name or address, and show it.
+    Scan {
+        /// The advertised name.
+        #[arg(long, default_value = "knixx")]
+        name: String,
+        /// The address instead of the name: the MAC address on Linux, the
+        /// device UUID on macOS.
+        #[arg(long, default_value = "")]
+        addr: String,
+        /// How long to scan, in seconds.
+        #[arg(long, default_value_t = 10)]
+        wait: u64,
+    },
 }
 
 fn parse_u32(s: &str) -> Result<u32, String> {
@@ -81,7 +95,26 @@ fn main() -> Result<()> {
             wait: Duration::from_secs(wait),
         })
         .map_err(anyhow::Error::msg),
+        Cmd::Scan { name, addr, wait } => scan(&name, &addr, wait),
     }
+}
+
+fn scan(name: &str, addr: &str, wait: u64) -> Result<()> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let found = rt.block_on(async {
+        let adapter = blescan::adapter().await?;
+        blescan::find(&adapter, name, addr, Duration::from_secs(wait)).await
+    });
+    let f = found.map_err(anyhow::Error::msg)?;
+    println!(
+        "{} {} rssi {}",
+        f.id,
+        f.name.as_deref().unwrap_or("-"),
+        f.rssi.map_or("-".to_string(), |r| r.to_string())
+    );
+    Ok(())
 }
 
 fn convert(elf: &Path, output: &Path, family: u32) -> Result<()> {

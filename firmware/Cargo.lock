@@ -805,6 +805,7 @@ dependencies = [
  "embassy-sync",
  "embassy-time",
  "embassy-usb",
+ "embedded-hal-async",
  "embedded-io-async 0.7.0",
  "knixx-bus",
  "knixx-cli",
@@ -813,6 +814,7 @@ dependencies = [
  "knixx-sensors",
  "knixx-storage",
  "knixx-ui",
+ "knixx-vl53l7cx",
  "nrf-mpsl",
  "nrf-sdc",
  "static_cell",
@@ -847,6 +849,13 @@ name = "knixx-ui"
 version = "0.1.0"
 dependencies = [
  "embassy-time",
+]
+
+[[package]]
+name = "knixx-vl53l7cx"
+version = "0.1.0"
+dependencies = [
+ "embedded-hal-async",
 ]
 
 [[package]]

@@ -125,7 +125,7 @@ impl knixx_cli::Ctx for Ctx {
     }
 }
 
-const fn commands() -> [Cmd<Ctx>; knixx_cli::NUM_SHARED + 4] {
+const fn commands() -> [Cmd<Ctx>; knixx_cli::NUM_SHARED + 5] {
     let s = knixx_cli::commands::<Ctx>();
     [
         s[0],
@@ -136,6 +136,11 @@ const fn commands() -> [Cmd<Ctx>; knixx_cli::NUM_SHARED + 4] {
             name: "sensor",
             help: "show the latest temperature, humidity and illuminance reading",
             run: crate::sensor::command,
+        },
+        Cmd {
+            name: "tof",
+            help: "show the time-of-flight sensor state and its latest motion",
+            run: crate::tof::command,
         },
         Cmd {
             name: "version",
@@ -155,7 +160,7 @@ const fn commands() -> [Cmd<Ctx>; knixx_cli::NUM_SHARED + 4] {
     ]
 }
 
-static COMMANDS: [Cmd<Ctx>; knixx_cli::NUM_SHARED + 4] = commands();
+static COMMANDS: [Cmd<Ctx>; knixx_cli::NUM_SHARED + 5] = commands();
 
 fn version(_: &mut Ctx, _: &[&str], w: &mut dyn Write) -> Action {
     let _ = writeln!(w, "{VERSION}");

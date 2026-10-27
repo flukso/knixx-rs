@@ -774,6 +774,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "knixx-vl53l7cx"
+version = "0.1.0"
+dependencies = [
+ "embedded-hal-async",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"

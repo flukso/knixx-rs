@@ -24,6 +24,11 @@ pub fn signal(mode: Mode) {
     let _ = TRIGGERS.try_send(Trigger { mode, cancel: false });
 }
 
+/// Ends mode, and drops its queued repeats.
+pub fn cancel(mode: Mode) {
+    let _ = TRIGGERS.try_send(Trigger { mode, cancel: true });
+}
+
 /// PWM ticks at 16 MHz: a period of 20 ticks is 1.25 µs.
 const PERIOD: u16 = 20;
 /// The high time of a 1 and a 0 bit; bit 15 makes the pin start high.

@@ -116,6 +116,7 @@ fit the 2 KiB queue of the port is dropped whole and noted as
 | `version` | the commit and build time: `version <commit> built <date>` |
 | `sys` | uptime, the USB output queue, USB DTR |
 | `sensor` | the latest temperature, humidity and illuminance readings |
+| `tof` | the time-of-flight sensor's state and its last motion |
 | `ota` | reboot into the bootloader for a BLE firmware update |
 | `help` | the commands |
 
@@ -149,6 +150,26 @@ They share I2C1 (TWIM1, SDA P0.12, SCL P0.11, 400 kHz) with the VL53L7CX,
 one transaction at a time. The internal pull-ups are on, as TinyGo had
 them, so that a missing sensor board fails with a NACK instead of leaving
 the lines floating.
+
+## Occupancy
+
+The VL53L7CX time-of-flight sensor (I2C1; INT P0.14, LPn P0.13, I2C_RST
+P0.15) runs in autonomous ranging mode at 4x4 with the occupancy settings
+of the configuration (ranging frequency, integration time, distance window,
+threshold) and the detection thresholds of its motion indicator: it pulses
+INT for each frame with motion over the threshold. Each pulse blinks green
+and goes to the bus engine, which publishes occupancy (DPT 1.018) on the
+first motion and its end after the configured timeout without motion. A
+change of the settings applies without a reboot; a sensor that fails is
+tried again a minute later. `tof` shows the sensor's state, its settings
+and the per-zone intensities of its last motion.
+
+`crates/knixx-vl53l7cx` ports the Go firmware's port of ST's VL53L7CX ULD
+2.0.1 driver, with the motion indicator and detection thresholds plugins
+and the sensor firmware (86 KiB), uploaded at each start in about 2 s. Its
+golden test replays the configuration against `testdata/configure.golden`,
+the transactions of ST's C driver, recorded with the harness in the Go
+repository.
 
 ## Configuration
 
@@ -202,6 +223,7 @@ next banner shows it as `last panic: ...`.
 | `crates/knixx-console` | the line editor, the console output queues and the BLE NUS framing |
 | `crates/knixx-ui` | the status LED player and the wall switch logic |
 | `crates/knixx-sensors` | async SHT2x and VCNL4040 drivers on embedded-hal |
+| `crates/knixx-vl53l7cx` | async VL53L7CX driver, a port of ST's ULD 2.0.1 with the motion plugins |
 | `crates/knixx-storage` | the configuration file on littlefs, compatible with the Go firmware's |
 | `host/knixx-host` | host library: firmware images (ELF to UF2, Intel HEX, binary), UF2 files, the bootloader's drive, the USB serial port, flashing, BLE scanning |
 | `host/bolt` | host tool: `bolt convert`, `bolt uf2`, `bolt scan` |

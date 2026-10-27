@@ -10,6 +10,8 @@ knixx-cli = { path = "../../crates/knixx-cli" }
 knixx-console = { path = "../../crates/knixx-console" }
 knixx-device = { path = "../../crates/knixx-device" }
 knixx-sensors = { path = "../../crates/knixx-sensors" }
+knixx-vl53l7cx = { path = "../../crates/knixx-vl53l7cx" }
+embedded-hal-async = "1"
 knixx-storage = { path = "../../crates/knixx-storage" }
 knixx-ui = { path = "../../crates/knixx-ui" }
 cortex-m = "0.7.10"

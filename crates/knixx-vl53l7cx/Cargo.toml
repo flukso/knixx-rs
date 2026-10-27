@@ -1,0 +1,9 @@
+[package]
+name = "knixx-vl53l7cx"
+version = "0.1.0"
+description = "Driver for the VL53L7CX time-of-flight sensor's motion indicator, a port of ST's ULD 2.0.1"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+embedded-hal-async = "1"

@@ -21,6 +21,7 @@ mod panic;
 mod sensor;
 mod storage;
 mod switches;
+mod tof;
 mod usbcdc;
 
 // MPSL takes the radio, its timers and the clock interrupt; USB's VBUS
@@ -105,6 +106,12 @@ async fn main(spawner: Spawner) {
 
     let i2c = i2c::start(p.TWISPI1, Irqs, p.P0_12, p.P0_11);
     spawner.spawn(sensor::task(i2c).unwrap());
+    let tof_pins = tof::Pins {
+        int: p.P0_14,
+        lpn: p.P0_13,
+        rst: p.P0_15,
+    };
+    spawner.spawn(tof::task(spawner, i2c, tof_pins).unwrap());
 
     switches::start(
         &spawner,

@@ -1,0 +1,12 @@
+[package]
+name = "knixx-storage"
+version = "0.1.0"
+description = "The configuration file on littlefs, compatible with the Go firmware's"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+knixx-device = { path = "../knixx-device" }
+# The littlefs C library; multiversion lets the configuration select the
+# on-disk version.
+littlefs2-sys = { version = "0.4", features = ["multiversion"] }

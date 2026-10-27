@@ -2,7 +2,7 @@
 //! edited with history (knixx_console::lineedit) and run as commands: the
 //! shared ones of knixx_cli and the firmware's own.
 
-use core::cell::Cell;
+use core::cell::{Cell, RefCell};
 use core::fmt::{self, Write};
 use core::sync::atomic::Ordering;
 
@@ -18,7 +18,7 @@ use knixx_cli::{Action, Cmd};
 use knixx_console::lineedit::{Editor, Sink};
 use knixx_device::thunder::Device;
 
-use crate::{boot, panic, usbcdc};
+use crate::{boot, panic, storage, usbcdc};
 
 const PROMPT: &str = ">>> ";
 
@@ -69,17 +69,40 @@ impl Sink for Echo {
 /// engine's command queue and flags, and the configuration store.
 pub struct Ctx;
 
-/// The configuration cannot be saved: storage follows.
-pub struct NoStore;
+/// The boot log, shown under the banner: what loading the configuration
+/// reported.
+pub static BOOT_LOG: Mutex<CriticalSectionRawMutex, RefCell<Log>> = Mutex::new(RefCell::new(Log::new()));
 
-impl fmt::Display for NoStore {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.write_str("no storage")
+/// A log of lines in a fixed buffer; what does not fit is cut off.
+pub struct Log {
+    buf: [u8; 512],
+    len: usize,
+}
+
+impl Log {
+    pub const fn new() -> Log {
+        Log {
+            buf: [0; 512],
+            len: 0,
+        }
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        &self.buf[..self.len]
+    }
+}
+
+impl Write for Log {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        let n = s.len().min(self.buf.len() - self.len);
+        self.buf[self.len..self.len + n].copy_from_slice(&s.as_bytes()[..n]);
+        self.len += n;
+        Ok(())
     }
 }
 
 impl knixx_cli::Ctx for Ctx {
-    type SaveError = NoStore;
+    type SaveError = storage::SaveError;
 
     fn device(&self) -> Device {
         device()
@@ -97,8 +120,8 @@ impl knixx_cli::Ctx for Ctx {
         &FLAGS
     }
 
-    fn save(&mut self, _data: &[u8]) -> Result<(), NoStore> {
-        Err(NoStore)
+    fn save(&mut self, data: &[u8]) -> Result<(), storage::SaveError> {
+        storage::save(data)
     }
 }
 
@@ -193,6 +216,7 @@ pub async fn task(mut rx: Receiver<'static, Driver<'static, HardwareVbusDetect>>
             if !greeted {
                 greeted = true;
                 let _ = writeln!(Out, "=== knixx thunder ===\n{VERSION}");
+                BOOT_LOG.lock(|l| usbcdc::write_crlf(l.borrow().as_bytes()));
                 if let Some(m) = last_panic {
                     let _ = writeln!(Out, "last panic: {m}");
                 }

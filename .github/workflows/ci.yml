@@ -24,7 +24,14 @@ jobs:
           cargo fmt --check
           (cd firmware && cargo fmt --check)
       - name: no_std crates
-        run: for c in crates/*; do (cd $c && cargo build --target thumbv7em-none-eabihf) || exit 1; done
+        # knixx-storage's littlefs C library builds with clang and
+        # firmware/c-include, as in firmware/.cargo/config.toml.
+        env:
+          CC_thumbv7em_none_eabihf: clang
+          CFLAGS_thumbv7em_none_eabihf: -ffreestanding -mcpu=cortex-m4
+        run: |
+          export CPATH="$PWD/firmware/c-include"
+          for c in crates/*; do (cd $c && cargo build --target thumbv7em-none-eabihf) || exit 1; done
       - name: Firmware build and size
         run: cargo xtask build
       - name: Licenses

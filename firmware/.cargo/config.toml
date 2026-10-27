@@ -6,3 +6,11 @@ target = "thumbv7em-none-eabihf"
 # of corrupting statics.
 linker = "flip-link"
 rustflags = ["-C", "link-arg=-Tlink.x"]
+
+# The littlefs C library (knixx-storage) is compiled with clang and the
+# freestanding headers it brings, plus c-include/ for the few C library
+# functions littlefs declares: no C library is needed.
+[env]
+CC_thumbv7em_none_eabihf = "clang"
+CFLAGS_thumbv7em_none_eabihf = "-ffreestanding -mcpu=cortex-m4"
+CPATH = { value = "c-include", relative = true }

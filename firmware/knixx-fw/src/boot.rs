@@ -45,6 +45,8 @@ pub fn check_priorities() {
         ("GPIOTE", interrupt::GPIOTE),
         ("RTC1", interrupt::RTC1),
         ("CLOCK_POWER", interrupt::CLOCK_POWER),
+        ("PWM0", interrupt::PWM0),
+        ("QSPI", interrupt::QSPI),
     ] {
         let prio = irq.get_priority();
         assert!(

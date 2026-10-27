@@ -7,7 +7,6 @@ use embassy_nrf::gpio::{Level, Output, OutputDrive};
 use embassy_nrf::interrupt::{self, InterruptExt, Priority};
 use embassy_nrf::rng::{self, Rng};
 use embassy_nrf::{bind_interrupts, peripherals, usb};
-use knixx_device::config;
 use knixx_ui::led::Mode;
 use nrf_mpsl::MultiprotocolServiceLayer;
 use static_cell::StaticCell;
@@ -17,6 +16,7 @@ mod boot;
 mod console;
 mod leds;
 mod panic;
+mod storage;
 mod switches;
 mod usbcdc;
 
@@ -30,6 +30,7 @@ bind_interrupts!(struct Irqs {
     RADIO => nrf_mpsl::HighPrioInterruptHandler;
     TIMER0 => nrf_mpsl::HighPrioInterruptHandler;
     RTC0 => nrf_mpsl::HighPrioInterruptHandler;
+    QSPI => embassy_nrf::qspi::InterruptHandler<peripherals::QSPI>;
 });
 
 #[embassy_executor::main]
@@ -46,14 +47,27 @@ async fn main(spawner: Spawner) {
     interrupt::USBD.set_priority(Priority::P3);
     interrupt::RNG.set_priority(Priority::P3);
     interrupt::PWM0.set_priority(Priority::P3);
+    interrupt::QSPI.set_priority(Priority::P3);
 
     // The red LED stays off: the status LEDs show errors.
     let _led = Output::new(p.P1_15, Level::Low, OutputDrive::Standard);
     spawner.spawn(leds::task(p.PWM0, p.P0_28).unwrap());
     leds::signal(Mode::Init);
 
-    // The built-in configuration, until storage follows.
-    console::DEVICE.lock(|d| d.set(config::parse(config::DEFAULT).ok()));
+    // The configuration from the flash, or the built-in default.
+    let pins = storage::Pins {
+        sck: p.P0_19,
+        csn: p.P0_20,
+        io0: p.P0_17,
+        io1: p.P0_22,
+        io2: p.P0_23,
+        io3: p.P0_21,
+    };
+    let (dev, ok) = console::BOOT_LOG.lock(|l| storage::load(p.QSPI, Irqs, pins, &mut *l.borrow_mut()));
+    console::DEVICE.lock(|d| d.set(Some(dev)));
+    if !ok {
+        leds::signal(Mode::Error);
+    }
 
     let mpsl_p = nrf_mpsl::Peripherals::new(p.RTC0, p.TIMER0, p.TEMP, p.PPI_CH19, p.PPI_CH30, p.PPI_CH31);
     static MPSL: StaticCell<MultiprotocolServiceLayer> = StaticCell::new();

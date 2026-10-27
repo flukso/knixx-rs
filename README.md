@@ -33,6 +33,12 @@ forwarding, and RAM from `0x20000008`.
 - [flip-link](https://github.com/knurling-rs/flip-link):
   `cargo install flip-link`. It is the firmware's linker; it puts the stack
   below the statics, so a stack overflow faults instead of corrupting them.
+- clang and libclang. The littlefs C library is compiled with clang for the
+  nRF52840, with its freestanding headers and the two in
+  `firmware/c-include/`, so no C library or ARM GCC is needed; the C
+  libraries' Rust bindings (littlefs, Nordic's MPSL and SoftDevice
+  Controller) are generated with libclang. macOS has both with the Xcode
+  command line tools; on Debian or Ubuntu: `apt install clang libclang-dev`.
 - Optional: [cargo-deny](https://github.com/EmbarkStudios/cargo-deny), for
   `cargo deny check` (licenses: no copyleft dependencies).
 
@@ -108,8 +114,30 @@ fit the 2 KiB queue of the port is dropped whole and noted as
 | `ota` | reboot into the bootloader for a BLE firmware update |
 | `help` | the commands |
 
-The configuration is the built-in default until storage follows; the bus
-commands queue for the bus task that follows.
+The bus commands queue for the bus task that follows.
+
+## Configuration
+
+The configuration is `/knixx.ini` on a littlefs on the Feather's 2 MiB QSPI
+flash (GD25Q16C), the same file in the same littlefs as the Go firmware's,
+so a board keeps its configuration when it moves between the two:
+`crates/knixx-storage` drives the littlefs C library with the Go firmware's
+geometry (256-byte pages, 4 KiB blocks, 512-byte caches) and on-disk version
+2.1. The littlefs2 crate is not used: it pins on-disk version 2.0, and
+littlefs does not mount a filesystem of a later minor version.
+`crates/knixx-storage/testdata/golfs` makes and reads test images with the
+Go firmware's littlefs (`go run . write ../go.img`, `go run . read
+../rust.img`); the tests read the Go image, and with `UPDATE_TESTDATA=1`
+write the Rust one.
+
+At boot the firmware mounts the littlefs, writes the default configuration
+when there is no file, and shows what it did under the banner. A blank flash
+is formatted, as the Go firmware does, but a flash that holds a littlefs
+that does not mount is left alone: the firmware falls back to the built-in
+default and blinks red. `config set` and `config init` save the file.
+
+The flash is driven in single-line SPI mode, as the Go firmware did, through
+an aligned RAM buffer, since QSPI's EasyDMA only reaches RAM.
 
 ## LEDs and switches
 
@@ -140,6 +168,7 @@ next banner shows it as `last panic: ...`.
 | `crates/knixx-console` | the line editor, the console output queues and the BLE NUS framing |
 | `crates/knixx-ui` | the status LED player and the wall switch logic |
 | `crates/knixx-sensors` | async SHT2x and VCNL4040 drivers on embedded-hal |
+| `crates/knixx-storage` | the configuration file on littlefs, compatible with the Go firmware's |
 | `host/knixx-host` | host library: firmware images (ELF to UF2, Intel HEX, binary), UF2 files, the bootloader's drive, the USB serial port, flashing, BLE scanning |
 | `host/bolt` | host tool: `bolt convert`, `bolt uf2`, `bolt scan` |
 | `xtask/` | `cargo xtask` tasks |

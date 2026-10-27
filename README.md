@@ -115,6 +115,7 @@ fit the 2 KiB queue of the port is dropped whole and noted as
 | `config [dump\|init\|get <key>\|set <key> <value>...]` | the configuration |
 | `version` | the commit and build time: `version <commit> built <date>` |
 | `sys` | uptime, the USB output queue, USB DTR |
+| `sensor` | the latest temperature, humidity and illuminance readings |
 | `ota` | reboot into the bootloader for a BLE firmware update |
 | `help` | the commands |
 
@@ -135,6 +136,19 @@ as the Go firmware's ftdi tool did, without libftdi:
 ```
 cargo run -p knixx-shell -- [--port <serial port>] [--config knixx.ini]
 ```
+
+## Sensors
+
+The SHT20 (temperature, humidity) and the ambient light sensor of the
+VCNL4040 are read 5 s after boot and then every minute, on an absolute
+ticker, and published to the temperature (DPT 9.001), humidity (9.007) and
+illuminance (9.004) groups. A sensor that fails is reported, blinks red
+and is tried again the next minute. `sensor` shows the latest readings.
+
+They share I2C1 (TWIM1, SDA P0.12, SCL P0.11, 400 kHz) with the VL53L7CX,
+one transaction at a time. The internal pull-ups are on, as TinyGo had
+them, so that a missing sensor board fails with a NACK instead of leaving
+the lines floating.
 
 ## Configuration
 

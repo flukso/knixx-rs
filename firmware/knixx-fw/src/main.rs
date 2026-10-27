@@ -15,8 +15,10 @@ mod ble;
 mod boot;
 mod bus;
 mod console;
+mod i2c;
 mod leds;
 mod panic;
+mod sensor;
 mod storage;
 mod switches;
 mod usbcdc;
@@ -33,6 +35,7 @@ bind_interrupts!(struct Irqs {
     RTC0 => nrf_mpsl::HighPrioInterruptHandler;
     QSPI => embassy_nrf::qspi::InterruptHandler<peripherals::QSPI>;
     UARTE0 => embassy_nrf::buffered_uarte::InterruptHandler<peripherals::UARTE0>;
+    TWISPI1 => embassy_nrf::twim::InterruptHandler<peripherals::TWISPI1>;
 });
 
 #[embassy_executor::main]
@@ -52,6 +55,7 @@ async fn main(spawner: Spawner) {
     interrupt::QSPI.set_priority(Priority::P3);
     interrupt::UARTE0.set_priority(Priority::P3);
     interrupt::TIMER1.set_priority(Priority::P3);
+    interrupt::TWISPI1.set_priority(Priority::P3);
 
     // The red LED stays off: the status LEDs show errors.
     let _led = Output::new(p.P1_15, Level::Low, OutputDrive::Standard);
@@ -98,6 +102,9 @@ async fn main(spawner: Spawner) {
         Irqs,
     );
     spawner.spawn(bus::task(uart).unwrap());
+
+    let i2c = i2c::start(p.TWISPI1, Irqs, p.P0_12, p.P0_11);
+    spawner.spawn(sensor::task(i2c).unwrap());
 
     switches::start(
         &spawner,

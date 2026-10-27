@@ -798,6 +798,7 @@ version = "0.1.0"
 dependencies = [
  "cortex-m",
  "cortex-m-rt",
+ "embassy-embedded-hal",
  "embassy-executor",
  "embassy-futures",
  "embassy-nrf",
@@ -809,6 +810,7 @@ dependencies = [
  "knixx-cli",
  "knixx-console",
  "knixx-device",
+ "knixx-sensors",
  "knixx-storage",
  "knixx-ui",
  "nrf-mpsl",
@@ -824,6 +826,13 @@ version = "0.1.0"
 [[package]]
 name = "knixx-ncn"
 version = "0.1.0"
+
+[[package]]
+name = "knixx-sensors"
+version = "0.1.0"
+dependencies = [
+ "embedded-hal-async",
+]
 
 [[package]]
 name = "knixx-storage"

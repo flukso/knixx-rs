@@ -49,6 +49,7 @@ pub fn check_priorities() {
         ("QSPI", interrupt::QSPI),
         ("UARTE0", interrupt::UARTE0),
         ("TIMER1", interrupt::TIMER1),
+        ("TWISPI1", interrupt::TWISPI1),
     ] {
         let prio = irq.get_priority();
         assert!(

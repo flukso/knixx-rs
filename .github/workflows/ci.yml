@@ -9,6 +9,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Packages
+        run: sudo apt-get update && sudo apt-get install -y clang libclang-dev libdbus-1-dev pkg-config
       - name: Toolchain
         run: rustup show
       - name: flip-link

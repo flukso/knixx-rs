@@ -15,7 +15,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use knixx_host::image::Image;
-use knixx_host::{blescan, flash, uf2};
+use knixx_host::{flash, uf2};
 
 /// Where the application may go: from the end of the S140 6.1.1 SoftDevice
 /// to the start of the user data that precedes the bootloader.
@@ -178,10 +178,6 @@ fn cycle(args: &[String]) -> Result<()> {
     };
     let (uf2, v) = build()?;
     let expect = format!("version {} built {}", v.commit, v.date);
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    let adapter = rt.block_on(blescan::adapter()).map_err(anyhow::Error::msg)?;
     for i in 1..=n {
         eprintln!("--- cycle {i} of {n}");
         flash::uf2(flash::Options {
@@ -192,10 +188,14 @@ fn cycle(args: &[String]) -> Result<()> {
             wait: Duration::from_secs(20),
         })
         .map_err(|e| anyhow::anyhow!("cycle {i}: usb: {e} ({} passed)", i - 1))?;
-        let f = rt
-            .block_on(blescan::find(&adapter, "knixx", "", Duration::from_secs(10)))
-            .map_err(|e| anyhow::anyhow!("cycle {i}: ble: {e} ({} passed)", i - 1))?;
-        eprintln!("advertising: {} rssi {:?}", f.id, f.rssi);
+        let scan = Command::new(env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
+            .args(["run", "--quiet", "--package", "bolt", "--", "scan", "--wait", "10"])
+            .current_dir(root())
+            .status()
+            .context("run bolt scan")?;
+        if !scan.success() {
+            bail!("cycle {i}: ble: no advertising ({} passed)", i - 1);
+        }
     }
     eprintln!("all {n} cycles passed");
     Ok(())

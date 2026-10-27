@@ -2,6 +2,7 @@
 //! Adafruit nRF52 bootloader takes, the bootloader's drive, the board's USB
 //! serial port, flashing over USB, and BLE scanning.
 
+#[cfg(feature = "ble")]
 pub mod blescan;
 pub mod drive;
 pub mod flash;

@@ -28,6 +28,8 @@ forwarding, and RAM from `0x20000008`.
 
 ## Requirements
 
+The firmware and the host tools build on macOS and Linux.
+
 - Rust through rustup; `rust-toolchain.toml` pins the version and adds the
   `thumbv7em-none-eabihf` target.
 - [flip-link](https://github.com/knurling-rs/flip-link):
@@ -39,6 +41,8 @@ forwarding, and RAM from `0x20000008`.
   libraries' Rust bindings (littlefs, Nordic's MPSL and SoftDevice
   Controller) are generated with libclang. macOS has both with the Xcode
   command line tools; on Debian or Ubuntu: `apt install clang libclang-dev`.
+- For `bolt` only, on Linux: `apt install libdbus-1-dev pkg-config`, for
+  BLE through BlueZ. The firmware build, `cargo xtask`, does without.
 - Optional: [cargo-deny](https://github.com/EmbarkStudios/cargo-deny), for
   `cargo deny check` (licenses: no copyleft dependencies).
 

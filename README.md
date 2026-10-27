@@ -54,8 +54,18 @@ cargo xtask build
 
 builds the firmware, stamped with the git commit and the build time, and
 writes `build/knixx.elf`, `build/knixx.uf2`, `build/knixx.hex` and the DFU
-package `build/knixx-dfu.zip`. It fails when the image does not fit
-`0x26000`–`0xED000`.
+package `build/knixx-dfu.zip`. It reports the flash and RAM the firmware
+takes, and fails when the image does not fit `0x26000`–`0xED000` or the
+firmware links a global allocator.
+
+The RAM holds the statics, about 35 KiB, and one stack below them, about
+220 KiB: flip-link puts the stack at the bottom of RAM, so that an overflow
+faults instead of overwriting statics. The embassy tasks live in statics;
+the stack serves `main`, the executor and the interrupt handlers. `sys`
+shows the most of it used since boot: the firmware paints the stack at
+boot and finds the lowest word that changed.
+
+`cd firmware && cargo bloat --release --crates` shows what takes the flash.
 
 ## Flashing
 
@@ -148,7 +158,7 @@ fit the 2 KiB queue of the port is dropped whole and noted as
 | `stat` | report the transceiver's state and system status |
 | `config [dump\|init\|get <key>\|set <key> <value>...]` | the configuration |
 | `version` | the commit and build time: `version <commit> built <date>` |
-| `sys` | uptime, the USB and NUS output queues, USB DTR |
+| `sys` | uptime, the stack high-water mark, the USB and NUS output queues, USB DTR |
 | `sensor` | the latest temperature, humidity and illuminance readings |
 | `tof` | the time-of-flight sensor's state and its last motion |
 | `nus [on\|off]` | move the console to BLE (Nordic UART Service) or back to USB |
@@ -276,6 +286,37 @@ runs the host tests, among them the tests of the Go packages the crates
 port. The crates in `crates/` are `no_std` without `alloc`: the firmware
 links no allocator, so nothing in it can use the heap. `cargo clippy --all-targets` and, in `firmware/`,
 `cargo clippy --release` lint the two workspaces.
+
+CI runs the host tests, both lints, `cargo fmt --check`, the `no_std`
+build of each crate, `cargo xtask build` with its flash, RAM and allocator
+checks, `cargo bloat` and the license check.
+
+## Acceptance
+
+The checks on a board, with the Go firmware and tools at hand, that the
+Rust firmware replaces the Go firmware:
+
+1. Flashing: `cargo xtask flash` from the Go firmware and from the Rust
+   firmware, on macOS and on Linux; the board reports the version it was
+   built with.
+2. Over BLE: `ota` on the console, then `cargo xtask ota`, installs the
+   Rust package; `bolt ota --zip` with the Go package installs the Go
+   firmware, and the Go `bolt ota` the Rust package.
+3. Configuration: `/knixx.ini` survives Go → Rust → Go, with a
+   `config set` on each side; a blank flash is formatted; a corrupt file
+   gives the defaults and the red LED.
+4. KNX: switching A and B from the console and from the contacts gets a
+   positive L_Data.con; the sensor values go out every 60 s; occupancy goes
+   true and false; the sniffer lines are those of the Go firmware for the
+   same traffic, checked with knixx-shell on a second NCN5121.
+5. BLE console: `nus on` and its gesture, `cargo xtask term` over NUS with
+   multibyte UTF-8, the 60 s return to USB, `nus off` and its gesture, the
+   blue LED.
+6. Several hours of running, past 2h27m:
+   uptime goes on, the stack high-water mark in `sys` stays put, no
+   `last panic` in the banner, the bus traffic flows.
+7. `cargo xtask build`: the image fits and no allocator is linked.
+8. `cargo test`: every ported Go test passes.
 
 ## License
 

@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
-use object::{Object, ObjectSection};
+use object::{Object, ObjectSection, ObjectSymbol};
 
 use crate::uf2;
 
@@ -222,9 +222,85 @@ fn hex_record(out: &mut String, addr: u16, kind: u8, data: &[u8]) {
     writeln!(out, "{:02X}", sum.wrapping_neg()).unwrap();
 }
 
+/// The RAM of a firmware ELF, from the symbols of cortex-m-rt's linker
+/// script as flip-link places them: the stack at the bottom of RAM, the
+/// statics (.data, .bss, .uninit) above it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ram {
+    /// The stack, from its bottom (_stack_end) to its top (_stack_start).
+    pub stack: (u32, u32),
+    /// The statics, from __sdata to __euninit.
+    pub statics: (u32, u32),
+    /// Whether the ELF links a global allocator: the firmware has none, so
+    /// that nothing allocates.
+    pub allocator: bool,
+}
+
+/// The symbols that a global allocator brings.
+const ALLOCATOR_SYMBOLS: [&str; 3] = ["__rust_alloc", "__rg_alloc", "__rdl_alloc"];
+
+impl Ram {
+    pub fn from_elf(data: &[u8]) -> Result<Ram, RamError> {
+        let file = object::File::parse(data).map_err(|e| RamError(e.to_string()))?;
+        let mut syms = BTreeMap::new();
+        let mut allocator = false;
+        for s in file.symbols() {
+            let Ok(name) = s.name() else {
+                continue;
+            };
+            if ALLOCATOR_SYMBOLS.contains(&name) {
+                allocator = true;
+            }
+            if matches!(name, "_stack_end" | "_stack_start" | "__sdata" | "__euninit") {
+                syms.insert(name, s.address() as u32);
+            }
+        }
+        let get = |n: &str| {
+            syms.get(n)
+                .copied()
+                .ok_or_else(|| RamError(format!("no symbol {n}")))
+        };
+        Ok(Ram {
+            stack: (get("_stack_end")?, get("_stack_start")?),
+            statics: (get("__sdata")?, get("__euninit")?),
+            allocator,
+        })
+    }
+
+    /// The stack's size in bytes.
+    pub fn stack_size(&self) -> u32 {
+        self.stack.1 - self.stack.0
+    }
+
+    /// The statics' size in bytes.
+    pub fn statics_size(&self) -> u32 {
+        self.statics.1 - self.statics.0
+    }
+}
+
+/// An error reading the RAM layout of an ELF file.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("elf: {0}")]
+pub struct RamError(pub String);
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The RAM of the firmware, when cargo xtask build made its ELF file.
+    #[test]
+    fn firmware_ram() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../build/knixx.elf");
+        let Ok(data) = std::fs::read(path) else {
+            return;
+        };
+        let ram = Ram::from_elf(&data).unwrap();
+        assert!(!ram.allocator, "the firmware links an allocator");
+        // flip-link: the stack from the start of RAM up to the statics.
+        assert_eq!(ram.stack.0, 0x2000_0008);
+        assert_eq!(ram.stack.1, ram.statics.0);
+        assert_eq!(ram.statics.1, 0x2004_0000);
+    }
 
     #[test]
     fn add_merges_touching_runs() {

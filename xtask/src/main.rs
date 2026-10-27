@@ -17,7 +17,7 @@ use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use knixx_host::image::Image;
+use knixx_host::image::{Image, Ram};
 use knixx_host::legacydfu::{InitPacket, Package, read_hex};
 use knixx_host::{flash, uf2};
 
@@ -144,6 +144,10 @@ fn build() -> Result<(PathBuf, Version)> {
     let elf = root().join("firmware/target/thumbv7em-none-eabihf/release/knixx-fw");
     let data = fs::read(&elf).with_context(|| elf.display().to_string())?;
     let img = Image::from_elf(&data)?;
+    let ram = Ram::from_elf(&data)?;
+    if ram.allocator {
+        bail!("the firmware links a global allocator: something allocates on the heap");
+    }
     if img.start() < APP_START || img.end() > APP_END {
         bail!(
             "image {:#x}..{:#x} is outside the application's flash {APP_START:#x}..{APP_END:#x}",
@@ -171,6 +175,11 @@ fn build() -> Result<(PathBuf, Version)> {
         v.date,
         APP_END - APP_START,
         used * 100 / (APP_END - APP_START)
+    );
+    eprintln!(
+        "RAM: {} bytes of statics, {} bytes of stack, no allocator",
+        ram.statics_size(),
+        ram.stack_size()
     );
     Ok((out.join("knixx.uf2"), v))
 }

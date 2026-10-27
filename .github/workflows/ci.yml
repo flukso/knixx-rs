@@ -36,6 +36,12 @@ jobs:
           for c in crates/*; do (cd $c && cargo build --target thumbv7em-none-eabihf) || exit 1; done
       - name: Firmware build and size
         run: cargo xtask build
+      - name: cargo-bloat
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-bloat
+      - name: Flash by crate
+        run: cd firmware && cargo bloat --release --crates -n 20
       - name: Licenses
         uses: EmbarkStudios/cargo-deny-action@v2
         with:

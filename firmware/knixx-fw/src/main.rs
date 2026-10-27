@@ -20,6 +20,7 @@ mod leds;
 mod nus;
 mod panic;
 mod sensor;
+mod stack;
 mod storage;
 mod switches;
 mod tof;
@@ -42,6 +43,7 @@ bind_interrupts!(struct Irqs {
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
+    stack::paint();
     boot::sanitize();
 
     // Interrupt priorities: MPSL keeps P0 (radio, its timers) and P1 to

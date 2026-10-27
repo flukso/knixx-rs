@@ -53,8 +53,9 @@ cargo xtask build
 ```
 
 builds the firmware, stamped with the git commit and the build time, and
-writes `build/knixx.elf`, `build/knixx.uf2` and `build/knixx.hex`. It fails
-when the image does not fit `0x26000`–`0xED000`.
+writes `build/knixx.elf`, `build/knixx.uf2`, `build/knixx.hex` and the DFU
+package `build/knixx-dfu.zip`. It fails when the image does not fit
+`0x26000`–`0xED000`.
 
 ## Flashing
 
@@ -82,6 +83,25 @@ its version over USB and advertise over BLE. Every flash ends with the
 bootloader jumping to the application without a reset, the path on which
 USB and the BLE controller can hang.
 
+### Over BLE
+
+```
+cargo xtask ota [--addr <address>]
+```
+
+builds the firmware and sends `build/knixx-dfu.zip` with `bolt ota` to a
+board whose bootloader runs its BLE DFU mode: run `ota` on the board's
+console first, which reboots it into the bootloader advertising as
+`AdaDFU`. The update is the legacy DFU of the Adafruit bootloader, with a
+receipt every 10 packets. The packets carry as much as the negotiated ATT
+MTU allows, 244 bytes with the bootloader's MTU of 247; `bolt ota --chunk`
+sets another size.
+
+`bolt genpkg <app.hex> <package.zip>` builds a DFU package as
+adafruit-nrfutil dfu genpkg does: the files in the zip are byte for byte
+those of the Go `bolt genpkg`, so the Rust and the Go tools and packages
+mix freely.
+
 ## Bluetooth
 
 The firmware runs Nordic's SoftDevice Controller
@@ -95,12 +115,26 @@ interrupts run at P2 and P3, which the firmware checks at boot. Before
 anything else, `main` clears the POWER and CLOCK state that the bootloader
 leaves when it jumps to the application (nrf-sdc issue #103).
 
-The board advertises as `knixx`; `bolt scan` looks for it.
-
 ## Console
 
 The USB serial port carries the console, as with the Go firmware: the
 banner on the first key, then commands after the `>>> ` prompt.
+
+`nus on` moves the console to BLE: the board advertises as `knixx` with the
+Nordic UART Service (NUS), and the console follows the central that
+connects, banner on its first key. The console comes back to USB on
+`nus off`, after 60 s without a central, or on reset; typing on USB in the
+meantime is dropped. Holding A on + B off on the wall switch for 5 s does
+`nus on`, A off + B on `nus off`. The board asks the central for a 15 ms
+connection interval, so that echo keeps up with typing. Output goes out in
+notifications of 20 bytes that never split a UTF-8 character.
+
+```
+cargo xtask term [--usb | --ble | --port <port> | --addr <address>]
+```
+
+runs `bolt term`, a terminal on the console: on USB when the board answers
+there, else on BLE. Ctrl-] quits. `bolt scan` looks for the advertising.
 
 Lines are edited as with the Go firmware: backspace, and a history of 8
 lines on the up and down arrows or Ctrl-P and Ctrl-N. Output that does not
@@ -114,9 +148,10 @@ fit the 2 KiB queue of the port is dropped whole and noted as
 | `stat` | report the transceiver's state and system status |
 | `config [dump\|init\|get <key>\|set <key> <value>...]` | the configuration |
 | `version` | the commit and build time: `version <commit> built <date>` |
-| `sys` | uptime, the USB output queue, USB DTR |
+| `sys` | uptime, the USB and NUS output queues, USB DTR |
 | `sensor` | the latest temperature, humidity and illuminance readings |
 | `tof` | the time-of-flight sensor's state and its last motion |
+| `nus [on\|off]` | move the console to BLE (Nordic UART Service) or back to USB |
 | `ota` | reboot into the bootloader for a BLE firmware update |
 | `help` | the commands |
 
@@ -205,7 +240,8 @@ The wall switch contacts, A on/off (D9, D10) and B on/off (A0, A1), are
 active low with the internal pull-ups and debounced in software: a press
 counts once the contact stayed closed for 30 ms, and again only after it
 stayed open for 30 ms. Each press switches the lights as the `switch`
-command does.
+command does. Held for 5 s, A on + B off moves the console to BLE and
+A off + B on back to USB.
 
 A panic resets the board; its message survives the reset in RAM and the
 next banner shows it as `last panic: ...`.
@@ -225,8 +261,8 @@ next banner shows it as `last panic: ...`.
 | `crates/knixx-sensors` | async SHT2x and VCNL4040 drivers on embedded-hal |
 | `crates/knixx-vl53l7cx` | async VL53L7CX driver, a port of ST's ULD 2.0.1 with the motion plugins |
 | `crates/knixx-storage` | the configuration file on littlefs, compatible with the Go firmware's |
-| `host/knixx-host` | host library: firmware images (ELF to UF2, Intel HEX, binary), UF2 files, the bootloader's drive, the USB serial port, flashing, BLE scanning |
-| `host/bolt` | host tool: `bolt convert`, `bolt uf2`, `bolt scan` |
+| `host/knixx-host` | host library: firmware images (ELF to UF2, Intel HEX, binary), UF2 files, the bootloader's drive, the USB serial port, flashing, BLE scanning, legacy DFU packages and updates |
+| `host/bolt` | host tool: `bolt convert`, `genpkg`, `ota`, `term`, `uf2`, `scan` |
 | `host/knixx-shell` | KNX shell on the host over an FTDI-attached NCN5121 |
 | `xtask/` | `cargo xtask` tasks |
 

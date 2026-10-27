@@ -26,4 +26,5 @@ embassy-usb = "0.6.0"
 nrf-mpsl = { version = "0.4.0", features = ["nrf52840", "critical-section-impl"] }
 nrf-sdc = { version = "0.4.0", features = ["nrf52840", "peripheral"] }
 static_cell = "2.1.1"
-trouble-host = { version = "0.8.0", default-features = false, features = ["peripheral", "gatt", "default-packet-pool"] }
+heapless = "0.9"
+trouble-host = { version = "0.8.0", default-features = false, features = ["peripheral", "gatt", "default-packet-pool", "derive"] }

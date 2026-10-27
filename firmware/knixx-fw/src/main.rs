@@ -17,6 +17,7 @@ mod bus;
 mod console;
 mod i2c;
 mod leds;
+mod nus;
 mod panic;
 mod sensor;
 mod storage;

@@ -1,7 +1,10 @@
 //! cargo xtask <task>: the build and flash tasks of knixx-rs.
 //!
-//!     build   build the firmware and write build/knixx.{elf,uf2,hex}
+//!     build   build the firmware and write build/knixx.{elf,uf2,hex} and
+//!             the DFU package build/knixx-dfu.zip
 //!     flash   build, flash over USB and check the board runs the build
+//!     ota     build, then send the DFU package over BLE with bolt ota
+//!     term    a terminal on the board's console with bolt term
 //!     cycle   build, then flash n times, checking USB and BLE after each
 //!
 //! The firmware is built in firmware/, a workspace of its own for the
@@ -15,6 +18,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use knixx_host::image::Image;
+use knixx_host::legacydfu::{InitPacket, Package, read_hex};
 use knixx_host::{flash, uf2};
 
 /// Where the application may go: from the end of the S140 6.1.1 SoftDevice
@@ -25,9 +29,13 @@ const APP_END: u32 = 0xED000;
 const USAGE: &str = "usage: cargo xtask <task>
 
 tasks:
-  build   build the firmware and write build/knixx.{elf,uf2,hex}
+  build   build the firmware and write build/knixx.{elf,uf2,hex} and the
+          DFU package build/knixx-dfu.zip
   flash   build, flash over USB and check the board runs the build
           [--port <serial port>]
+  ota     build, then send build/knixx-dfu.zip over BLE to a board in BLE
+          DFU mode (run ota on its console) [bolt ota flags, e.g. --addr]
+  term    a terminal on the console, over USB or BLE [bolt term flags]
   cycle   build, then flash <n> times; after each flash the board must
           report its version over USB and advertise as knixx over BLE
 ";
@@ -38,6 +46,17 @@ fn main() -> Result<()> {
         Some("build") => build().map(|_| ()),
         Some("flash") => flash(&args[1..]),
         Some("cycle") => cycle(&args[1..]),
+        Some("ota") => {
+            build()?;
+            let mut a = vec!["ota".to_string(), "--zip".into(), "build/knixx-dfu.zip".into()];
+            a.extend_from_slice(&args[1..]);
+            bolt(&a)
+        }
+        Some("term") => {
+            let mut a = vec!["term".to_string()];
+            a.extend_from_slice(&args[1..]);
+            bolt(&a)
+        }
         Some("help" | "-h" | "--help") | None => {
             eprint!("{USAGE}");
             Ok(())
@@ -136,7 +155,15 @@ fn build() -> Result<(PathBuf, Version)> {
     fs::create_dir_all(&out)?;
     fs::write(out.join("knixx.elf"), &data)?;
     fs::write(out.join("knixx.uf2"), img.to_uf2(uf2::FAMILY_NRF52840))?;
-    fs::write(out.join("knixx.hex"), img.to_hex())?;
+    let hex = img.to_hex();
+    fs::write(out.join("knixx.hex"), &hex)?;
+    // The package of bolt genpkg build/knixx.hex: from the hex file, whose
+    // image genpkg rounds up to a multiple of 4.
+    let ip = InitPacket::feather();
+    let (_, bin) = read_hex(&hex)?;
+    let mut zip = std::io::Cursor::new(Vec::new());
+    Package::new(bin, &ip).write_zip(&mut zip, "knixx", &ip)?;
+    fs::write(out.join("knixx-dfu.zip"), zip.into_inner())?;
     let used = img.end() - APP_START;
     eprintln!(
         "build/knixx.uf2: version {} built {}, {used} of {} bytes of flash ({}%)",
@@ -146,6 +173,21 @@ fn build() -> Result<(PathBuf, Version)> {
         used * 100 / (APP_END - APP_START)
     );
     Ok((out.join("knixx.uf2"), v))
+}
+
+/// Runs bolt with args in the repository root. bolt is built on its own,
+/// with BLE, which xtask does without.
+fn bolt(args: &[String]) -> Result<()> {
+    let status = Command::new(env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
+        .args(["run", "--quiet", "--package", "bolt", "--"])
+        .args(args)
+        .current_dir(root())
+        .status()
+        .context("run bolt")?;
+    if !status.success() {
+        bail!("bolt {} failed", args[0]);
+    }
+    Ok(())
 }
 
 /// Builds the firmware and flashes it over USB, then checks that the board

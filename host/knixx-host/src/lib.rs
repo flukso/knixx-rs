@@ -7,5 +7,6 @@ pub mod blescan;
 pub mod drive;
 pub mod flash;
 pub mod image;
+pub mod legacydfu;
 pub mod uf2;
 pub mod usbserial;

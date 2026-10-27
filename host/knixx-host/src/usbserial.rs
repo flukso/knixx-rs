@@ -73,7 +73,7 @@ pub fn sysfs_ports(root: &Path, vid: u16, pid: u16) -> Vec<String> {
 /// Opens port name at baud, exclusively (serialport's default: TIOCEXCL
 /// and a flock), so that others cannot open it meanwhile. Asking for it a
 /// second time fails with EBUSY on macOS.
-fn open(name: &str, baud: u32) -> Result<serialport::TTYPort, Error> {
+pub fn open(name: &str, baud: u32) -> Result<serialport::TTYPort, Error> {
     serialport::new(name, baud)
         .exclusive(true)
         .timeout(Duration::from_millis(50))

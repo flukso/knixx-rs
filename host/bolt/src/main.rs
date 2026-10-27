@@ -1,8 +1,19 @@
 //! bolt is the host tool for knixx boards.
 //!
 //!     bolt convert  turn the firmware ELF into UF2, Intel HEX or a binary
+//!     bolt genpkg   build a DFU package from the application's hex file
+//!     bolt ota      send a DFU package over BLE to the bootloader
+//!     bolt term     a terminal on the console, over USB or BLE
 //!     bolt uf2      flash a UF2 file over USB through the UF2 bootloader
 //!     bolt scan     look for a board's BLE advertising
+//!
+//! Status messages go to stderr.
+
+mod ble;
+mod genpkg;
+mod input;
+mod ota;
+mod term;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -11,6 +22,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use knixx_host::image::Image;
+use knixx_host::legacydfu::{InitPacket, parse_ids, parse_uint};
 use knixx_host::{blescan, flash, uf2};
 
 #[derive(Parser)]
@@ -33,6 +45,74 @@ enum Cmd {
         /// The UF2 family ID.
         #[arg(long, default_value_t = uf2::FAMILY_NRF52840, value_parser = parse_u32)]
         family: u32,
+    },
+    /// Build a DFU package from the application's hex file, as
+    /// adafruit-nrfutil dfu genpkg does. The defaults are those of the
+    /// Feather nRF52840's Adafruit bootloader: device type 0x0052 and the
+    /// firmware id 0x00B6 of its S140 6.1.1.
+    Genpkg {
+        /// The application's hex file.
+        hex: PathBuf,
+        /// The package to write.
+        zip: PathBuf,
+        /// The device type of the init packet.
+        #[arg(long, default_value = "0x0052", value_parser = parse_u16)]
+        dev_type: u16,
+        /// The device revision of the init packet.
+        #[arg(long, default_value = "0xFFFF", value_parser = parse_u16)]
+        dev_rev: u16,
+        /// The application version of the init packet.
+        #[arg(long, default_value = "0xFFFFFFFF", value_parser = parse_u32)]
+        app_ver: u32,
+        /// Comma separated SoftDevice firmware ids the application runs on.
+        #[arg(long, default_value = "0x00B6")]
+        sd_req: String,
+    },
+    /// Send a DFU package over BLE to the bootloader (run ota on the knixx
+    /// console first).
+    Ota {
+        /// The DFU package, as cargo xtask build makes it.
+        #[arg(long, default_value = "build/knixx-dfu.zip")]
+        zip: PathBuf,
+        /// The advertised name of the bootloader.
+        #[arg(long, default_value = "AdaDFU")]
+        name: String,
+        /// The address of the bootloader instead of the name: the MAC
+        /// address on Linux, the device UUID on macOS.
+        #[arg(long, default_value = "")]
+        addr: String,
+        /// How long to wait for the bootloader, in seconds.
+        #[arg(long, default_value_t = 60)]
+        wait: u64,
+        /// The bytes per packet write, a multiple of 4 from 20 to 244; the
+        /// default is the payload with the negotiated ATT MTU.
+        #[arg(long, default_value_t = 0)]
+        chunk: usize,
+    },
+    /// A terminal on the console, over USB or BLE (run nus on on the knixx
+    /// console for BLE). Without --usb or --ble it takes USB if the board
+    /// answers there, else BLE. Ctrl-] quits.
+    Term {
+        /// The console on the USB serial port.
+        #[arg(long)]
+        usb: bool,
+        /// The console on BLE.
+        #[arg(long)]
+        ble: bool,
+        /// The USB serial port of the board, instead of finding it; implies
+        /// --usb.
+        #[arg(long)]
+        port: Option<String>,
+        /// The advertised name of the board on BLE.
+        #[arg(long, default_value = "knixx")]
+        name: String,
+        /// The BLE address of the board instead of the name: the MAC address
+        /// on Linux, the device UUID on macOS; implies --ble.
+        #[arg(long, default_value = "")]
+        addr: String,
+        /// How long to wait for the board on BLE, in seconds.
+        #[arg(long, default_value_t = 30)]
+        wait: u64,
     },
     /// Flash a UF2 file over USB: reset the board into its UF2 bootloader
     /// (or find it there after a double tap on reset), copy the file to its
@@ -71,11 +151,11 @@ enum Cmd {
 }
 
 fn parse_u32(s: &str) -> Result<u32, String> {
-    let r = match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-        Some(h) => u32::from_str_radix(h, 16),
-        None => s.parse(),
-    };
-    r.map_err(|e| e.to_string())
+    parse_uint(s, 32).map(|v| v as u32)
+}
+
+fn parse_u16(s: &str) -> Result<u16, String> {
+    parse_uint(s, 16).map(|v| v as u16)
 }
 
 fn main() -> Result<()> {
@@ -96,6 +176,55 @@ fn main() -> Result<()> {
         })
         .map_err(anyhow::Error::msg),
         Cmd::Scan { name, addr, wait } => scan(&name, &addr, wait),
+        Cmd::Genpkg {
+            hex,
+            zip,
+            dev_type,
+            dev_rev,
+            app_ver,
+            sd_req,
+        } => {
+            let sd_req = parse_ids(&sd_req).map_err(|e| anyhow::anyhow!("--sd-req: {e}"))?;
+            let ip = InitPacket {
+                dev_type,
+                dev_rev,
+                app_ver,
+                sd_req,
+            };
+            genpkg::run(&hex, &zip, &ip)
+        }
+        Cmd::Ota {
+            zip,
+            name,
+            addr,
+            wait,
+            chunk,
+        } => {
+            if chunk != 0 && (chunk % 4 != 0 || !(20..=244).contains(&chunk)) {
+                bail!("--chunk must be a multiple of 4 from 20 to 244");
+            }
+            ota::run(ota::Options {
+                zip: &zip,
+                name,
+                addr,
+                wait: Duration::from_secs(wait),
+                chunk,
+            })
+        }
+        Cmd::Term {
+            usb,
+            ble,
+            port,
+            name,
+            addr,
+            wait,
+        } => term::run(term::Options {
+            mode: term::mode(usb, ble, port.is_some(), !addr.is_empty())?,
+            port,
+            name,
+            addr,
+            wait: Duration::from_secs(wait),
+        }),
     }
 }
 
@@ -139,7 +268,7 @@ fn convert(elf: &Path, output: &Path, family: u32) -> Result<()> {
 
 /// Writes data to path through a temporary file in the same directory, so
 /// that a failed write leaves no partial file.
-fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
+pub fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
     let dir = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())

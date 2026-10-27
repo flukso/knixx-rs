@@ -8,3 +8,5 @@ license.workspace = true
 [dependencies]
 object = { version = "0.36", default-features = false, features = ["read_core", "elf", "std"] }
 thiserror = "2"
+# Without libudev: Linux ports are found through sysfs instead.
+serialport = { version = "4", default-features = false }

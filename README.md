@@ -46,16 +46,45 @@ builds the firmware, stamped with the git commit and the build time, and
 writes `build/knixx.elf`, `build/knixx.uf2` and `build/knixx.hex`. It fails
 when the image does not fit `0x26000`–`0xED000`.
 
-To flash, copy `build/knixx.uf2` to the `FTHR840BOOT` drive that the board
-shows after a double tap on its reset button.
+## Flashing
+
+```
+cargo xtask flash [--port <serial port>]
+```
+
+builds the firmware and flashes it over USB: it resets the running board
+into its UF2 bootloader with the 1200-baud touch (or finds the bootloader's
+`FTHR840BOOT` drive after a double tap on reset), copies the UF2 file to the
+drive and waits until the board reports the version it just built. It
+finds the board by its USB ID, 239A:802A, the same as the Go firmware's.
+`bolt uf2 [file]` does the same for a given UF2 file, with `--expect` for
+the version line.
+
+macOS must allow the terminal to write to removable volumes (System
+Settings, Privacy & Security, Files & Folders).
+
+## Console
+
+The USB serial port carries the console, as with the Go firmware: the
+banner on the first key, then commands after the `>>> ` prompt.
+
+| Command | |
+|---|---|
+| `version` | the commit and build time: `version <commit> built <date>` |
+| `sys` | uptime, the USB output queue, USB DTR |
+| `ota` | reboot into the bootloader for a BLE firmware update |
+| `help` | the commands |
+
+A panic resets the board; its message survives the reset in RAM and the
+next banner shows it as `last panic: ...`.
 
 ## Layout
 
 | Path | Contents |
 |---|---|
 | `firmware/` | the firmware workspace, built for the nRF52840 |
-| `host/knixx-host` | host library: firmware images (ELF to UF2, Intel HEX, binary), UF2 files |
-| `host/bolt` | host tool: `bolt convert` |
+| `host/knixx-host` | host library: firmware images (ELF to UF2, Intel HEX, binary), UF2 files, the bootloader's drive, the USB serial port, flashing |
+| `host/bolt` | host tool: `bolt convert`, `bolt uf2` |
 | `xtask/` | `cargo xtask` tasks |
 
 ## Tests

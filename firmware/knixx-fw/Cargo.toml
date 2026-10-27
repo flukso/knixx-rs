@@ -7,8 +7,11 @@ edition = "2024"
 cortex-m = { version = "0.7.10", features = ["critical-section-single-core"] }
 cortex-m-rt = { version = "0.7.7", features = ["set-vtor"] }
 embassy-executor = { version = "0.10.0", features = ["platform-cortex-m", "executor-thread"] }
+embassy-futures = "0.1.2"
 embassy-nrf = { version = "0.11.0", features = ["nrf52840", "time-driver-rtc1", "gpiote", "unstable-pac"] }
+embassy-sync = "0.8.0"
 embassy-time = "0.5.1"
+embassy-usb = "0.6.0"
 nrf-mpsl = { version = "0.4.0", features = ["nrf52840"] }
 nrf-sdc = { version = "0.4.0", features = ["nrf52840", "peripheral"] }
 static_cell = "2.1.1"

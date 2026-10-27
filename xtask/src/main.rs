@@ -1,6 +1,7 @@
 //! cargo xtask <task>: the build and flash tasks of knixx-rs.
 //!
 //!     build   build the firmware and write build/knixx.{elf,uf2,hex}
+//!     flash   build, flash over USB and check the board runs the build
 //!
 //! The firmware is built in firmware/, a workspace of its own for the
 //! nRF52840, stamped with the git commit and the build time.
@@ -9,11 +10,11 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use knixx_host::image::Image;
-use knixx_host::uf2;
+use knixx_host::{flash, uf2};
 
 /// Where the application may go: from the end of the S140 6.1.1 SoftDevice
 /// to the start of the user data that precedes the bootloader.
@@ -24,12 +25,15 @@ const USAGE: &str = "usage: cargo xtask <task>
 
 tasks:
   build   build the firmware and write build/knixx.{elf,uf2,hex}
+  flash   build, flash over USB and check the board runs the build
+          [--port <serial port>]
 ";
 
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("build") => build().map(|_| ()),
+        Some("flash") => flash(&args[1..]),
         Some("help" | "-h" | "--help") | None => {
             eprint!("{USAGE}");
             Ok(())
@@ -138,6 +142,25 @@ fn build() -> Result<(PathBuf, Version)> {
         used * 100 / (APP_END - APP_START)
     );
     Ok((out.join("knixx.uf2"), v))
+}
+
+/// Builds the firmware and flashes it over USB, then checks that the board
+/// reports the new version.
+fn flash(args: &[String]) -> Result<()> {
+    let port = match args {
+        [] => None,
+        [flag, p] if flag == "--port" => Some(p.clone()),
+        _ => bail!("usage: cargo xtask flash [--port <serial port>]"),
+    };
+    let (uf2, v) = build()?;
+    flash::uf2(flash::Options {
+        file: &uf2,
+        port,
+        volume: flash::VOLUME,
+        expect: Some(format!("version {} built {}", v.commit, v.date)),
+        wait: Duration::from_secs(20),
+    })
+    .map_err(anyhow::Error::msg)
 }
 
 #[cfg(test)]

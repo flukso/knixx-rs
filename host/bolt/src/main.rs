@@ -1,14 +1,16 @@
 //! bolt is the host tool for knixx boards.
 //!
 //!     bolt convert  turn the firmware ELF into UF2, Intel HEX or a binary
+//!     bolt uf2      flash a UF2 file over USB through the UF2 bootloader
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use knixx_host::image::Image;
-use knixx_host::uf2;
+use knixx_host::{flash, uf2};
 
 #[derive(Parser)]
 #[command(version, about = "Host tool for knixx boards")]
@@ -31,6 +33,27 @@ enum Cmd {
         #[arg(long, default_value_t = uf2::FAMILY_NRF52840, value_parser = parse_u32)]
         family: u32,
     },
+    /// Flash a UF2 file over USB: reset the board into its UF2 bootloader
+    /// (or find it there after a double tap on reset), copy the file to its
+    /// drive and wait for the board to come back.
+    Uf2 {
+        /// The UF2 file.
+        #[arg(default_value = "build/knixx.uf2")]
+        file: PathBuf,
+        /// The serial port of the running board, instead of finding it.
+        #[arg(long)]
+        port: Option<String>,
+        /// The name of the UF2 bootloader's drive.
+        #[arg(long, default_value = flash::VOLUME)]
+        volume: String,
+        /// The line the board's version command must print after the flash.
+        #[arg(long)]
+        expect: Option<String>,
+        /// How long to wait, in seconds, for the drive and for the board to
+        /// come back.
+        #[arg(long, default_value_t = 20)]
+        wait: u64,
+    },
 }
 
 fn parse_u32(s: &str) -> Result<u32, String> {
@@ -44,6 +67,20 @@ fn parse_u32(s: &str) -> Result<u32, String> {
 fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Convert { elf, output, family } => convert(&elf, &output, family),
+        Cmd::Uf2 {
+            file,
+            port,
+            volume,
+            expect,
+            wait,
+        } => flash::uf2(flash::Options {
+            file: &file,
+            port,
+            volume: &volume,
+            expect,
+            wait: Duration::from_secs(wait),
+        })
+        .map_err(anyhow::Error::msg),
     }
 }
 

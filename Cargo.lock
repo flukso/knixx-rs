@@ -745,6 +745,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "knixx-shell"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "embassy-time",
+ "knixx-bus",
+ "knixx-cli",
+ "knixx-device",
+ "knixx-host",
+ "serialport",
+]
+
+[[package]]
 name = "knixx-storage"
 version = "0.1.0"
 dependencies = [

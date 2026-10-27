@@ -118,7 +118,23 @@ fit the 2 KiB queue of the port is dropped whole and noted as
 | `ota` | reboot into the bootloader for a BLE firmware update |
 | `help` | the commands |
 
-The bus commands queue for the bus task that follows.
+## KNX bus
+
+The NCN5121 transceiver is on UARTE0 (TX D0/P0.25, RX D1/P0.24) at 38400
+baud, 8N1, as with the Go firmware. The bus task runs `crates/knixx-bus`:
+the console, the wall switches and, later, the sensors queue commands for
+it; each group write waits for its L_Data.con, up to 500 ms; `sniff on`
+traces the bus on the console, with the values of the configured groups
+decoded. Errors show on the console and blink red. Received bytes land in
+a 256-byte ring by EasyDMA, so none are lost while the flash erases.
+
+`knixx-shell` runs the same bus engine and console commands on the host,
+over an NCN5121 attached through an FTDI USB serial adapter (0403:6001),
+as the Go firmware's ftdi tool did, without libftdi:
+
+```
+cargo run -p knixx-shell -- [--port <serial port>] [--config knixx.ini]
+```
 
 ## Configuration
 
@@ -175,6 +191,7 @@ next banner shows it as `last panic: ...`.
 | `crates/knixx-storage` | the configuration file on littlefs, compatible with the Go firmware's |
 | `host/knixx-host` | host library: firmware images (ELF to UF2, Intel HEX, binary), UF2 files, the bootloader's drive, the USB serial port, flashing, BLE scanning |
 | `host/bolt` | host tool: `bolt convert`, `bolt uf2`, `bolt scan` |
+| `host/knixx-shell` | KNX shell on the host over an FTDI-attached NCN5121 |
 | `xtask/` | `cargo xtask` tasks |
 
 ## Tests

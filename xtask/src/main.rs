@@ -189,7 +189,16 @@ fn cycle(args: &[String]) -> Result<()> {
         })
         .map_err(|e| anyhow::anyhow!("cycle {i}: usb: {e} ({} passed)", i - 1))?;
         let scan = Command::new(env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
-            .args(["run", "--quiet", "--package", "bolt", "--", "scan", "--wait", "10"])
+            .args([
+                "run",
+                "--quiet",
+                "--package",
+                "bolt",
+                "--",
+                "scan",
+                "--wait",
+                "10",
+            ])
             .current_dir(root())
             .status()
             .context("run bolt scan")?;

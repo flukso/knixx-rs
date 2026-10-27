@@ -1,0 +1,16 @@
+[package]
+name = "knixx-shell"
+version = "0.1.0"
+description = "A KNX shell on the host: the firmware's bus engine and console commands over an FTDI-attached NCN5121"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+knixx-bus = { path = "../../crates/knixx-bus" }
+knixx-cli = { path = "../../crates/knixx-cli" }
+knixx-device = { path = "../../crates/knixx-device" }
+knixx-host = { path = "../knixx-host", default-features = false }
+embassy-time = "0.5"
+serialport = { version = "4", default-features = false }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"

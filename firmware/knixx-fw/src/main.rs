@@ -13,6 +13,7 @@ use static_cell::StaticCell;
 
 mod ble;
 mod boot;
+mod bus;
 mod console;
 mod leds;
 mod panic;
@@ -31,6 +32,7 @@ bind_interrupts!(struct Irqs {
     TIMER0 => nrf_mpsl::HighPrioInterruptHandler;
     RTC0 => nrf_mpsl::HighPrioInterruptHandler;
     QSPI => embassy_nrf::qspi::InterruptHandler<peripherals::QSPI>;
+    UARTE0 => embassy_nrf::buffered_uarte::InterruptHandler<peripherals::UARTE0>;
 });
 
 #[embassy_executor::main]
@@ -48,6 +50,8 @@ async fn main(spawner: Spawner) {
     interrupt::RNG.set_priority(Priority::P3);
     interrupt::PWM0.set_priority(Priority::P3);
     interrupt::QSPI.set_priority(Priority::P3);
+    interrupt::UARTE0.set_priority(Priority::P3);
+    interrupt::TIMER1.set_priority(Priority::P3);
 
     // The red LED stays off: the status LEDs show errors.
     let _led = Output::new(p.P1_15, Level::Low, OutputDrive::Standard);
@@ -80,6 +84,20 @@ async fn main(spawner: Spawner) {
     let (rx, tx) = usbcdc::start(&spawner, p.USBD, Irqs);
     spawner.spawn(usbcdc::tx_task(tx).unwrap());
     spawner.spawn(console::task(rx).unwrap());
+
+    let uart = bus::uart(
+        bus::Peripherals {
+            uarte: p.UARTE0,
+            timer: p.TIMER1,
+            ppi_ch0: p.PPI_CH0,
+            ppi_ch1: p.PPI_CH1,
+            ppi_group: p.PPI_GROUP0,
+            rxd: p.P0_24,
+            txd: p.P0_25,
+        },
+        Irqs,
+    );
+    spawner.spawn(bus::task(uart).unwrap());
 
     switches::start(
         &spawner,

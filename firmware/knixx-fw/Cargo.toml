@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+embedded-io-async = "0.7"
 knixx-bus = { path = "../../crates/knixx-bus" }
 knixx-cli = { path = "../../crates/knixx-cli" }
 knixx-console = { path = "../../crates/knixx-console" }

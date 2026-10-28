@@ -128,7 +128,10 @@ leaves when it jumps to the application (nrf-sdc issue #103).
 ## Console
 
 The USB serial port carries the console, as with the Go firmware: the
-banner on the first key, then commands after the `>>> ` prompt.
+banner on the first key, then commands after the `>>> ` prompt. Unlike the
+Go firmware, which greets once per boot, every terminal that opens the port
+(raising DTR) gets the banner on its first key, even after a tool such as
+the version check of `cargo xtask flash` had the port before it.
 
 `nus on` moves the console to BLE: the board advertises as `knixx` with the
 Nordic UART Service (NUS), and the console follows the central that

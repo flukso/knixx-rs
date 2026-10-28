@@ -15,7 +15,7 @@ use knixx_bus::{Engine, Output};
 use knixx_ui::led::Mode;
 use static_cell::StaticCell;
 
-use crate::{console, leds, usbcdc};
+use crate::{console, leds};
 
 /// The peripherals of the bus.
 pub struct Peripherals {
@@ -28,12 +28,13 @@ pub struct Peripherals {
     pub txd: Peri<'static, P0_25>,
 }
 
-/// The bus engine's output: lines to the console, errors to the red LED.
+/// The bus engine's output: lines to the console, on USB or BLE, errors to
+/// the red LED.
 struct Console;
 
 impl Output for Console {
     fn write(&mut self, b: &[u8]) {
-        usbcdc::write_crlf(b);
+        console::write_crlf(b);
     }
 
     fn failed(&mut self) {

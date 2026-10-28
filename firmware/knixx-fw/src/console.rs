@@ -84,12 +84,19 @@ pub struct Out;
 
 impl Write for Out {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        if on_nus() {
-            nus::write_crlf(s.as_bytes());
-        } else {
-            usbcdc::write_crlf(s.as_bytes());
-        }
+        write_crlf(s.as_bytes());
         Ok(())
+    }
+}
+
+/// Queues b for the port the console runs on, with "\n" turned into
+/// "\r\n", whole or not at all: the output of tasks other than the
+/// console's, such as the bus trace.
+pub fn write_crlf(b: &[u8]) {
+    if on_nus() {
+        nus::write_crlf(b);
+    } else {
+        usbcdc::write_crlf(b);
     }
 }
 
@@ -307,6 +314,9 @@ struct Console {
     /// Whether the banner was shown on the port: it is shown on the first
     /// key, so that it is not lost before a terminal is attached.
     greeted: bool,
+    /// The USB terminal session (usbcdc::SESSIONS) that the console last
+    /// saw a key of: each new one is greeted with the banner.
+    usb_session: u32,
     /// The connection state of the central that the console last saw.
     was_connected: bool,
     last_panic: Option<&'static str>,
@@ -404,6 +414,21 @@ impl Console {
         Echo.write(PROMPT.as_bytes());
     }
 
+    /// Starts over on USB when the keys come from a terminal that opened
+    /// the port since the last key: it gets the banner on its first key, and
+    /// the line typed in the last session is dropped.
+    fn new_usb_session(&mut self) {
+        let s = usbcdc::SESSIONS.load(Ordering::Relaxed);
+        if s == self.usb_session {
+            return;
+        }
+        self.usb_session = s;
+        if !on_nus() {
+            self.editor.discard();
+            self.greeted = false;
+        }
+    }
+
     /// Handles a key of the port the console runs on.
     async fn key(&mut self, b: u8) {
         if !self.greeted {
@@ -443,6 +468,7 @@ pub async fn task(mut rx: Receiver<'static, Driver<'static, HardwareVbusDetect>>
     let mut con = Console {
         editor: Editor::new(PROMPT),
         greeted: false,
+        usb_session: 0,
         was_connected: false,
         last_panic: panic::take_last(msg),
         ctx: Ctx,
@@ -457,6 +483,7 @@ pub async fn task(mut rx: Receiver<'static, Driver<'static, HardwareVbusDetect>>
         };
         match select3(usb, nus::RX_READY.wait(), Timer::after_millis(100)).await {
             Either3::First(Ok(n)) => {
+                con.new_usb_session();
                 // Typing on USB while the console runs on NUS is dropped.
                 for &b in &buf[..n] {
                     if on_nus() {

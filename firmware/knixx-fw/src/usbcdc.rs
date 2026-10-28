@@ -9,7 +9,7 @@
 //! board into its UF2 bootloader on the 1200-baud touch.
 
 use core::cell::RefCell;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use embassy_executor::Spawner;
 use embassy_futures::select::{Either, select};
@@ -37,6 +37,10 @@ static WAKE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
 /// Whether the host holds DTR: a terminal has the port open.
 pub static DTR: AtomicBool = AtomicBool::new(false);
+
+/// Counts the terminal sessions: it goes up each time the host raises DTR,
+/// so that the console greets each new terminal with the banner.
+pub static SESSIONS: AtomicU32 = AtomicU32::new(0);
 
 /// The largest USB packet of the CDC data endpoints.
 const PACKET: usize = 64;
@@ -140,6 +144,9 @@ pub async fn tx_task(port: (Sender<'static, UsbDriver>, ControlChanged<'static>)
         'connected: loop {
             if let Either::First(()) = select(control.control_changed(), WAKE.wait()).await {
                 let dtr = control.dtr();
+                if dtr && !DTR.swap(dtr, Ordering::Relaxed) {
+                    SESSIONS.fetch_add(1, Ordering::Relaxed);
+                }
                 DTR.store(dtr, Ordering::Relaxed);
                 if tx.line_coding().data_rate() == 1200 && !dtr {
                     boot::reset_into(boot::UF2);

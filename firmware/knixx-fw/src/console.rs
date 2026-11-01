@@ -24,7 +24,9 @@ use knixx_device::thunder::Device;
 use knixx_ui::led::Mode;
 use knixx_ui::switches::HOLD_TIME;
 
-use crate::{boot, leds, nus, panic, storage, usbcdc};
+use knixx_console::upload::{Event, Upload};
+
+use crate::{boot, leds, nus, panic, script, storage, usbcdc};
 
 const PROMPT: &str = ">>> ";
 
@@ -73,8 +75,8 @@ fn on_nus() -> bool {
     ON_NUS.load(Ordering::Relaxed)
 }
 
-/// The time since boot, for the idle timer.
-fn now() -> core::time::Duration {
+/// The time since boot, for the idle timer and uploads.
+pub fn now() -> core::time::Duration {
     core::time::Duration::from_micros(Instant::now().as_micros())
 }
 
@@ -179,7 +181,7 @@ impl knixx_cli::Ctx for Ctx {
     }
 }
 
-const fn commands() -> [Cmd<Ctx>; knixx_cli::NUM_SHARED + 6] {
+const fn commands() -> [Cmd<Ctx>; knixx_cli::NUM_SHARED + 7] {
     let s = knixx_cli::commands::<Ctx>();
     [
         s[0],
@@ -202,6 +204,11 @@ const fn commands() -> [Cmd<Ctx>; knixx_cli::NUM_SHARED + 6] {
             run: nus_cmd,
         },
         Cmd {
+            name: "script",
+            help: "script [ls] | rm <name> | put <name> <size> <crc32>: the scripts in /scripts",
+            run: crate::script::command,
+        },
+        Cmd {
             name: "version",
             help: "show the commit and build time of the firmware",
             run: version,
@@ -219,7 +226,7 @@ const fn commands() -> [Cmd<Ctx>; knixx_cli::NUM_SHARED + 6] {
     ]
 }
 
-static COMMANDS: [Cmd<Ctx>; knixx_cli::NUM_SHARED + 6] = commands();
+static COMMANDS: [Cmd<Ctx>; knixx_cli::NUM_SHARED + 7] = commands();
 
 fn version(_: &mut Ctx, _: &[&str], w: &mut dyn Write) -> Action {
     let _ = writeln!(w, "{VERSION}");
@@ -336,6 +343,10 @@ struct Console {
     was_connected: bool,
     last_panic: Option<&'static str>,
     ctx: Ctx,
+    /// The upload in progress, which takes the console's input meanwhile,
+    /// and the buffer it fills.
+    upload: Option<Upload>,
+    stage: &'static mut [u8; script::MAX_SIZE],
 }
 
 impl Console {
@@ -382,7 +393,70 @@ impl Console {
                 self.nus_off().await;
                 let _ = writeln!(Out, "nus: off, console back on USB");
             }
+            Action::Upload => {
+                if let Some(up) = script::take_pending() {
+                    self.upload = Some(up);
+                    let _ = writeln!(Out, "ready");
+                }
+            }
             Action::None | Action::Exit => {}
+        }
+    }
+
+    /// Feeds data to the upload in progress, reporting each chunk, and
+    /// writes the script once it is complete.
+    fn feed_upload(&mut self, data: &[u8]) {
+        let Some(up) = self.upload.as_mut() else {
+            return;
+        };
+        let event = up.feed(data, &mut self.stage[..], now());
+        let (name, size) = (up.name, up.size);
+        let _ = match event {
+            None => return,
+            Some(Event::Ack(n)) => {
+                let _ = writeln!(Out, "ok {n}");
+                return;
+            }
+            Some(Event::Done(n)) => match script::store(name.as_str(), &self.stage[..n]) {
+                Ok(()) => writeln!(Out, "done {n}"),
+                Err(e) => writeln!(Out, "error: {e}"),
+            },
+            Some(Event::BadCrc) => writeln!(Out, "error: CRC mismatch, {size} bytes dropped"),
+        };
+        self.upload = None;
+        Echo.write(PROMPT.as_bytes());
+    }
+
+    /// Ends an upload that saw no byte for upload::TIMEOUT.
+    fn poll_upload(&mut self) {
+        let Some(up) = self.upload else {
+            return;
+        };
+        if up.timed_out(now()) {
+            let _ = writeln!(
+                Out,
+                "error: upload timed out after {} of {} bytes",
+                up.received(),
+                up.size
+            );
+            self.upload = None;
+            Echo.write(PROMPT.as_bytes());
+        }
+    }
+
+    /// Handles the input of the port the console runs on: keys, or the
+    /// bytes of an upload. What follows the line that starts an upload in the
+    /// same packet is dropped: the host waits for ready.
+    async fn input(&mut self, data: &[u8]) {
+        if self.upload.is_some() {
+            self.feed_upload(data);
+            return;
+        }
+        for &b in data {
+            self.key(b).await;
+            if self.upload.is_some() {
+                return;
+            }
         }
     }
 
@@ -472,7 +546,9 @@ impl Console {
             Err(_) => Action::None,
         };
         self.act(action).await;
-        Echo.write(PROMPT.as_bytes());
+        if self.upload.is_none() {
+            Echo.write(PROMPT.as_bytes());
+        }
     }
 }
 
@@ -487,11 +563,17 @@ pub async fn task(mut rx: Receiver<'static, Driver<'static, HardwareVbusDetect>>
         was_connected: false,
         last_panic: panic::take_last(msg),
         ctx: Ctx,
+        upload: None,
+        stage: {
+            static STAGE: static_cell::StaticCell<[u8; script::MAX_SIZE]> = static_cell::StaticCell::new();
+            STAGE.init([0; script::MAX_SIZE])
+        },
     };
     let mut buf = [0u8; 64];
     loop {
         con.poll_nus().await;
         con.poll_switches().await;
+        con.poll_upload();
         let usb = async {
             rx.wait_connection().await;
             rx.read_packet(&mut buf).await
@@ -500,20 +582,28 @@ pub async fn task(mut rx: Receiver<'static, Driver<'static, HardwareVbusDetect>>
             Either3::First(Ok(n)) => {
                 con.new_usb_session();
                 // Typing on USB while the console runs on NUS is dropped.
-                for &b in &buf[..n] {
-                    if on_nus() {
-                        break;
-                    }
-                    con.key(b).await;
+                if !on_nus() {
+                    con.input(&buf[..n]).await;
                 }
             }
             Either3::First(Err(_)) => {}
             Either3::Second(()) => {
+                let mut chunk = [0u8; 64];
                 while on_nus() {
-                    let Some(b) = nus::RX.lock(|r| r.borrow_mut().read_byte()) else {
+                    let n = nus::RX.lock(|r| {
+                        let mut r = r.borrow_mut();
+                        let mut n = 0;
+                        while n < chunk.len() {
+                            let Some(b) = r.read_byte() else { break };
+                            chunk[n] = b;
+                            n += 1;
+                        }
+                        n
+                    });
+                    if n == 0 {
                         break;
-                    };
-                    con.key(b).await;
+                    }
+                    con.input(&chunk[..n]).await;
                 }
             }
             Either3::Third(()) => {}

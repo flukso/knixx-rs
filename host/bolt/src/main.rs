@@ -4,15 +4,18 @@
 //!     bolt genpkg   build a DFU package from the application's hex file
 //!     bolt ota      send a DFU package over BLE to the bootloader
 //!     bolt term     a terminal on the console, over USB or BLE
+//!     bolt script   make, build and upload scripts; list and remove them
 //!     bolt uf2      flash a UF2 file over USB through the UF2 bootloader
 //!     bolt scan     look for a board's BLE advertising
 //!
 //! Status messages go to stderr.
 
 mod ble;
+mod client;
 mod genpkg;
 mod input;
 mod ota;
+mod script;
 mod term;
 
 use std::fs;
@@ -135,6 +138,12 @@ enum Cmd {
         #[arg(long, default_value_t = 20)]
         wait: u64,
     },
+    /// The scripts of the board: make one from the template, build it to
+    /// bytecode, upload it, list and remove the ones on the board.
+    Script {
+        #[command(subcommand)]
+        cmd: ScriptCmd,
+    },
     /// Look for a board's BLE advertising, by name or address, and show it.
     Scan {
         /// The advertised name.
@@ -147,6 +156,74 @@ enum Cmd {
         /// How long to scan, in seconds.
         #[arg(long, default_value_t = 10)]
         wait: u64,
+    },
+}
+
+/// Where the board's console is, for bolt script.
+#[derive(clap::Args)]
+struct Board {
+    /// The USB serial port of the board, instead of finding it.
+    #[arg(long)]
+    port: Option<String>,
+    /// The console on BLE (run nus on on the knixx console first). Without
+    /// --ble or --port, it takes USB if the board answers there, else BLE.
+    #[arg(long)]
+    ble: bool,
+    /// The advertised name of the board on BLE.
+    #[arg(long, default_value = "knixx")]
+    ble_name: String,
+    /// The BLE address of the board instead of its name: the MAC address on
+    /// Linux, the device UUID on macOS; implies --ble.
+    #[arg(long, default_value = "")]
+    addr: String,
+    /// How long to wait for the board on BLE, in seconds.
+    #[arg(long, default_value_t = 30)]
+    wait: u64,
+}
+
+impl Board {
+    fn target(&self) -> client::Target {
+        client::Target {
+            port: self.port.clone(),
+            ble: self.ble,
+            name: self.ble_name.clone(),
+            addr: self.addr.clone(),
+            wait: Duration::from_secs(self.wait),
+        }
+    }
+}
+
+#[derive(Subcommand)]
+enum ScriptCmd {
+    /// Write <name>.rhai from the template, to fill in.
+    New { name: String },
+    /// Build a script to bytecode, <script>.rhgn unless --output says.
+    Build {
+        script: PathBuf,
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+    /// Upload a script, built first when it is source, to the board's
+    /// /scripts.
+    Upload {
+        /// The script: source (.rhai) or bytecode (.rhgn).
+        script: PathBuf,
+        /// The script's name on the board; the file's name by default.
+        #[arg(long)]
+        name: Option<String>,
+        #[command(flatten)]
+        board: Board,
+    },
+    /// List the scripts on the board.
+    Ls {
+        #[command(flatten)]
+        board: Board,
+    },
+    /// Remove a script from the board.
+    Rm {
+        name: String,
+        #[command(flatten)]
+        board: Board,
     },
 }
 
@@ -176,6 +253,15 @@ fn main() -> Result<()> {
         })
         .map_err(anyhow::Error::msg),
         Cmd::Scan { name, addr, wait } => scan(&name, &addr, wait),
+        Cmd::Script { cmd } => match cmd {
+            ScriptCmd::New { name } => script::new(&name),
+            ScriptCmd::Build { script, output } => script::build(&script, output.as_deref()),
+            ScriptCmd::Upload { script, name, board } => {
+                script::upload(&script, name.as_deref(), &board.target())
+            }
+            ScriptCmd::Ls { board } => script::command("script ls", &board.target()),
+            ScriptCmd::Rm { name, board } => script::command(&format!("script rm {name}"), &board.target()),
+        },
         Cmd::Genpkg {
             hex,
             zip,

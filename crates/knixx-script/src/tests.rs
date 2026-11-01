@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::string::String;
+use std::vec;
 use std::vec::Vec;
 
 use knixx_knx::tp1::{self, AddrType, Apci, Telegram};
@@ -77,6 +78,15 @@ fn on_time(scope, uptime) {{ {time} }}
     )
 }
 
+/// The light writes and reads that rec holds since `from`, as (group,
+/// service, data).
+fn sent_since(rec: &Rec, from: usize) -> Vec<(u16, Apci, Vec<u8>)> {
+    rec.sent[from..]
+        .iter()
+        .map(|t| (t.dest, t.apci, t.data().to_vec()))
+        .collect()
+}
+
 #[test]
 fn template_compiles_and_runs() {
     let build = compile(TEMPLATE, &META).unwrap();
@@ -92,27 +102,65 @@ fn template_compiles_and_runs() {
         }
     );
     let (rt, host, mut s) = load(TEMPLATE);
+    let b = 0x0002; // 0/0/2
+    let occupied = |on: bool| tg("5/0/1", Apci::GroupValueWrite, &[on as u8]);
+    let n = || host.0.borrow().sent.len();
+
+    // on_init asks for B's state.
     s.init(&rt).unwrap();
-    // A write of 0/0/1 sets the state; a read of it is answered with it.
+    assert_eq!(
+        sent_since(&host.0.borrow(), 0),
+        [(b, Apci::GroupValueRead, vec![0])]
+    );
+    // B answers off.
+    s.telegram(&rt, &tg("0/0/2", Apci::GroupValueResponse, &[0]), false)
+        .unwrap();
+
+    // Occupied, from the board's own ToF at 100 s: B goes on.
+    s.time(&rt, 100).unwrap();
+    let at = n();
+    s.telegram(&rt, &occupied(true), true).unwrap();
+    assert_eq!(
+        sent_since(&host.0.borrow(), at),
+        [(b, Apci::GroupValueWrite, vec![1])]
+    );
+    // Occupied again at 105 s: B is on already, the timer starts over.
+    s.time(&rt, 105).unwrap();
+    let at = n();
+    s.telegram(&rt, &occupied(true), true).unwrap();
+    assert_eq!(n(), at);
+    // Not 10 s after 100, but after 105: B goes off at 115 s.
+    s.time(&rt, 110).unwrap();
+    assert_eq!(n(), at);
+    s.time(&rt, 114).unwrap();
+    assert_eq!(n(), at);
+    s.time(&rt, 115).unwrap();
+    assert_eq!(
+        sent_since(&host.0.borrow(), at),
+        [(b, Apci::GroupValueWrite, vec![0])]
+    );
+    assert_eq!(host.0.borrow().printed, ["B off 10 s after the last occupied"]);
+    // Not occupied: B is off already.
+    let at = n();
+    s.telegram(&rt, &occupied(false), true).unwrap();
+    s.time(&rt, 130).unwrap();
+    assert_eq!(n(), at);
+
+    // Someone switches B on, then the occupancy ends: B goes off.
+    s.telegram(&rt, &tg("0/0/2", Apci::GroupValueWrite, &[1]), false)
+        .unwrap();
+    s.telegram(&rt, &occupied(false), true).unwrap();
+    assert_eq!(
+        sent_since(&host.0.borrow(), at),
+        [(b, Apci::GroupValueWrite, vec![0])]
+    );
+    // Other groups change nothing.
+    let at = n();
     s.telegram(&rt, &tg("0/0/1", Apci::GroupValueWrite, &[1]), false)
         .unwrap();
-    s.telegram(&rt, &tg("0/0/1", Apci::GroupValueRead, &[0]), false)
+    s.telegram(&rt, &tg("5/0/2", Apci::GroupValueWrite, &[1]), true)
         .unwrap();
-    // Another group, and the board's own telegram, change nothing.
-    s.telegram(&rt, &tg("0/0/2", Apci::GroupValueWrite, &[0]), false)
-        .unwrap();
-    s.telegram(&rt, &tg("0/0/1", Apci::GroupValueWrite, &[0]), true)
-        .unwrap();
-    s.time(&rt, 3599).unwrap();
-    s.time(&rt, 3600).unwrap();
-    let r = host.0.borrow();
-    assert_eq!(r.sent.len(), 1);
-    let sent = r.sent[0];
-    assert_eq!(sent.dest, 0x0001);
-    assert_eq!(sent.apci, Apci::GroupValueResponse);
-    assert_eq!(sent.data(), [1]);
-    assert_eq!(sent.npci.addr_type, AddrType::Group);
-    assert_eq!(r.printed, ["up 1 h, light on"]);
+    assert_eq!(n(), at);
 }
 
 #[test]

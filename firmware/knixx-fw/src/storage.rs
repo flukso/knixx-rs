@@ -163,3 +163,68 @@ pub fn save(data: &[u8]) -> Result<(), SaveError> {
         None => Err(SaveError::Unavailable),
     })
 }
+
+/// Why a file operation failed.
+pub enum FileError {
+    /// The flash or its littlefs is not available.
+    Unavailable,
+    Fs(knixx_storage::FsError),
+}
+
+impl fmt::Display for FileError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            FileError::Unavailable => f.write_str("flash unavailable"),
+            FileError::Fs(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+/// Runs f on the flash, if its littlefs mounted at boot. It blocks the
+/// executor while the flash works.
+fn with_flash<R>(
+    f: impl FnOnce(&mut QspiFlash) -> Result<R, knixx_storage::FsError>,
+) -> Result<R, FileError> {
+    if !MOUNTED.lock(|m| m.get()) {
+        return Err(FileError::Unavailable);
+    }
+    FLASH.lock(|fl| match fl.borrow_mut().as_mut() {
+        Some(flash) => f(flash).map_err(FileError::Fs),
+        None => Err(FileError::Unavailable),
+    })
+}
+
+/// Reads the file at path into buf and returns its length.
+#[allow(dead_code)] // the script task reads the scripts
+pub fn read_file(path: &str, buf: &mut [u8]) -> Result<usize, FileError> {
+    with_flash(|fl| knixx_storage::read(fl, path, buf))
+}
+
+/// Writes data as the file at path, in its directory, which it makes if
+/// need be: whole, or not at all.
+pub fn write_file(dir: &str, path: &str, data: &[u8]) -> Result<(), FileError> {
+    with_flash(|fl| {
+        knixx_storage::mkdir(fl, dir)?;
+        knixx_storage::write_atomic(fl, path, data)
+    })
+}
+
+/// Removes the file at path and reports whether it was there.
+pub fn remove_file(path: &str) -> Result<bool, FileError> {
+    with_flash(|fl| knixx_storage::remove(fl, path))
+}
+
+/// Runs f on the name and size of each file in the directory at path; a
+/// missing directory has none.
+pub fn list_dir(path: &str, mut f: impl FnMut(&str, u32)) -> Result<(), FileError> {
+    match with_flash(|fl| {
+        knixx_storage::list(fl, path, |e| {
+            if !e.dir {
+                f(e.name, e.size)
+            }
+        })
+    }) {
+        Err(FileError::Fs(e)) if e.not_found() => Ok(()),
+        r => r,
+    }
+}

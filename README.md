@@ -291,6 +291,7 @@ pulled while a terminal was open, would stall every writer, the bus with
 | `sensor` | the latest temperature, humidity and illuminance reading |
 | `tof` | the ToF state, settings, warnings, motion count and the per zone motion of the last motion frame |
 | `nus [on\|off]` | show the BLE console state, move the console to BLE NUS or back to USB |
+| `script [ls] \| rm <name> \| put <name> <size> <crc32>` | list or remove the scripts in `/scripts`; `put` receives one, as `bolt script upload` sends it |
 | `ota` | reboot into the bootloader for a BLE firmware update, see [Over BLE](#over-ble) |
 | `version` | the commit and build time of the firmware, `version <commit> built <date>`, also shown in the banner |
 | `sys` | the uptime, the stack high-water mark, the heap in use and at most, the bytes queued and lost on the USB and BLE console outputs, and whether a USB terminal is open (DTR) |
@@ -601,7 +602,9 @@ the `nus` command, as it alone moves the console.
 
 - `bolt`: `bolt uf2` and `bolt ota` flash the firmware over USB and BLE,
   `bolt genpkg` builds DFU packages, `bolt term` is the terminal on the
-  console, `bolt scan` looks for a board's advertising, and `bolt convert`
+  console, `bolt script` makes, builds and uploads scripts and lists and
+  removes the ones on the board, `bolt scan` looks for a board's
+  advertising, and `bolt convert`
   turns the firmware ELF into UF2, Intel HEX or a binary. `cargo xtask`
   runs it; `cargo build --release -p bolt` builds it alone, as
   `target/release/bolt`.
@@ -722,7 +725,7 @@ folds onto the parabola y = 2x² − 1.
 | `crates/knixx-storage` | the configuration file on littlefs |
 | `crates/knixx-script` | scripts in Rhai Grain: the engine with its limits and the functions scripts call, loading and calling them, the compiler with its checks, and `template.rhai` |
 | `host/knixx-host` | host library: firmware images (ELF to UF2, Intel HEX, binary), UF2 files, the bootloader's drive, the USB serial port, flashing, BLE scanning, legacy DFU packages and updates |
-| `host/bolt` | host tool: `bolt convert`, `genpkg`, `ota`, `term`, `uf2`, `scan` |
+| `host/bolt` | host tool: `bolt convert`, `genpkg`, `ota`, `term`, `script`, `uf2`, `scan` |
 | `host/knixx-shell` | KNX shell on the host over an FTDI-attached NCN5121 |
 | `xtask/` | `cargo xtask` tasks |
 | `pcb/` | the schematics of the knixx Thunder and Thunder Sensor boards |

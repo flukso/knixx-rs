@@ -64,6 +64,9 @@ pub enum Action {
     Reboot(u8),
     /// Turns the BLE Nordic UART Service on or off.
     Nus(bool),
+    /// Starts the upload of a file over the console, which the command set
+    /// up.
+    Upload,
 }
 
 /// Cmd is a console command. Run writes its replies to the writer.

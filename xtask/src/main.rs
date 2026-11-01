@@ -24,6 +24,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use knixx_host::image::{Image, Ram};
 use knixx_host::legacydfu::{InitPacket, Package, read_hex};
+use knixx_host::time::utc;
 use knixx_host::{flash, uf2};
 
 /// Where the application may go: from the end of the S140 6.1.1 SoftDevice
@@ -125,28 +126,6 @@ impl Version {
             date: utc(secs),
         }
     }
-}
-
-/// Formats seconds since the epoch as 2006-01-02T15:04:05Z.
-fn utc(secs: u64) -> String {
-    let days = (secs / 86400) as i64;
-    let rem = secs % 86400;
-    // Days to civil date, after Howard Hinnant's algorithm.
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + i64::from(m <= 2);
-    format!(
-        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
-        rem / 3600,
-        rem / 60 % 60,
-        rem % 60
-    )
 }
 
 /// Builds the firmware, with scripts.
@@ -478,7 +457,7 @@ fn cycle(args: &[String]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{c_arrays, hex_bytes, utc};
+    use super::{c_arrays, hex_bytes};
 
     #[test]
     fn hex_literals() {
@@ -495,12 +474,5 @@ mod tests {
             c_arrays(h),
             [("A".to_string(), vec![1, 2, 3, 2]), ("C".to_string(), vec![0xab])]
         );
-    }
-
-    #[test]
-    fn utc_dates() {
-        assert_eq!(utc(0), "1970-01-01T00:00:00Z");
-        assert_eq!(utc(951_782_400), "2000-02-29T00:00:00Z");
-        assert_eq!(utc(1_793_050_000), "2026-10-26T21:26:40Z");
     }
 }

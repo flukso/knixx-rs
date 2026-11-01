@@ -21,6 +21,7 @@ mod i2c;
 mod leds;
 mod nus;
 mod panic;
+mod script;
 mod sensor;
 mod stack;
 mod storage;

@@ -8,5 +8,6 @@ pub mod drive;
 pub mod flash;
 pub mod image;
 pub mod legacydfu;
+pub mod time;
 pub mod uf2;
 pub mod usbserial;

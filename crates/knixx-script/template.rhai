@@ -28,6 +28,11 @@
 // has sent 4 telegrams already.
 //
 // Scripts have while and loop, but no for loops.
+//
+// The scope is the script's state: on_init, on_telegram and on_time get the
+// same one, and what they set in it stays. A function of the script's own
+// that changes it is called on it, as scope.f(), and changes this; given
+// the scope as an argument, f(scope), it would change a copy.
 
 fn on_info() {
     #{
@@ -41,29 +46,60 @@ fn on_info() {
     }
 }
 
+// The example follows the occupancy on 5/0/1 with light B on 0/0/2: it
+// switches B on or off when its state does not match the occupancy, and
+// switches it off 10 s after the last occupied, even while the occupancy
+// stays on. The occupancy comes from this board's own ToF sensor, so it
+// arrives with tg.own set.
+
 // scope is an object map that persists from call to call.
 fn on_init(scope) {
-    scope.light = ga("0/0/1");
+    scope.occupancy = ga("5/0/1");
+    scope.light = ga("0/0/2");
+    // B's state, as the bus last showed it; the read asks for it.
     scope.on = false;
+    knx_read(scope.light);
+    // The seconds after the last occupied after which B goes off. Functions
+    // see only their parameters, so settings live in the scope too.
+    scope.hold = 10;
+    // The uptime of the last on_time, and when B goes off; -1: not armed.
+    scope.now = 0;
+    scope.off_at = -1;
+}
+
+// Switches B to on, unless it is so already. A function that changes the
+// scope is called on it, scope.set_light(on), and reaches it as this: a
+// scope passed as an argument to it would be a copy.
+fn set_light(on) {
+    if this.on != on {
+        knx_write(this.light, dpt1(on));
+        this.on = on;
+    }
 }
 
 // tg: #{ src, dest, group, apci ("write", "read", "response" or "other"),
 // priority, hops, data (a blob, from the APCI octet on), own (sent by this
 // board) }
 fn on_telegram(scope, tg) {
-    if tg.own || tg.dest != scope.light {
-        return;
-    }
-    if tg.apci == "write" {
+    if tg.dest == scope.light && (tg.apci == "write" || tg.apci == "response") {
         scope.on = dpt1_of(tg.data);
-    } else if tg.apci == "read" {
-        knx_response(scope.light, dpt1(scope.on));
+    } else if tg.dest == scope.occupancy && tg.apci == "write" {
+        let occupied = dpt1_of(tg.data);
+        scope.set_light(occupied);
+        if occupied {
+            scope.off_at = scope.now + scope.hold;
+        }
     }
 }
 
 // uptime: seconds since boot.
 fn on_time(scope, uptime) {
-    if uptime % 3600 == 0 {
-        print(`up ${uptime / 3600} h, light ${if scope.on { "on" } else { "off" }}`);
+    scope.now = uptime;
+    if scope.off_at >= 0 && uptime >= scope.off_at {
+        scope.off_at = -1;
+        if scope.on {
+            print(`B off ${scope.hold} s after the last occupied`);
+            scope.set_light(false);
+        }
     }
 }

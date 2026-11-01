@@ -20,9 +20,9 @@ use crate::input::{DEFAULT_CHUNK, chunks};
 
 /// The NUS service and its characteristics: the central writes RX and is
 /// notified on TX.
-const NUS_SERVICE: &str = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
-const NUS_RX: &str = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
-const NUS_TX: &str = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
+pub(crate) const NUS_SERVICE: &str = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+pub(crate) const NUS_RX: &str = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
+pub(crate) const NUS_TX: &str = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
 
 /// How long bolt term waits for the board to answer a CR on USB before it
 /// takes the console to be on BLE.

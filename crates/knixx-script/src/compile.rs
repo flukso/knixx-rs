@@ -88,6 +88,10 @@ pub fn compile(source: &str, meta: &Meta) -> Result<Build, CompileError> {
     let mut engine = Engine::new_raw();
     // The board has no iterators: a for loop would fail there at run time.
     engine.disable_symbol("for");
+    // Rhai's defaults for the nesting of expressions are lower in a debug
+    // build; these, its release defaults, make a script compile the same in
+    // any build of the compiler.
+    engine.set_max_expr_depths(64, 32);
     let ast = engine
         .compile(&source)
         .map_err(|e| CompileError::Parse(e.to_string()))?;

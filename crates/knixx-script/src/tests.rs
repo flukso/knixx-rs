@@ -307,3 +307,39 @@ fn bad_bytecode() {
         let _ = s.init(&rt);
     }
 }
+
+#[test]
+fn send_rate() {
+    let (rt, host, mut s) = load(&script(
+        r#"let i = 0; while i < 4 { knx_write(ga("1/0/1"), dpt1(true)); i += 1; }"#,
+        "",
+    ));
+    s.init(&rt).unwrap();
+    let t = tg("0/0/9", Apci::GroupValueWrite, &[1]);
+    // Four calls of four sends fill the second; the fifth sends nothing.
+    rt.set_now(10);
+    for _ in 0..5 {
+        s.telegram(&rt, &t, false).unwrap();
+    }
+    assert_eq!(host.0.borrow().sent.len(), 16);
+    assert_eq!(rt.refused(), 4);
+    // The next second sends again.
+    rt.set_now(11);
+    s.telegram(&rt, &t, false).unwrap();
+    assert_eq!(host.0.borrow().sent.len(), 20);
+}
+
+#[test]
+fn fault_lines() {
+    // The division on line 6, in half, which on_time calls on line 4.
+    let src = script("", "half(uptime);").replace(
+        "fn on_time(scope, uptime) { half(uptime); }",
+        "fn on_time(scope, uptime) { half(uptime); }\nfn half(x) {\n    x / 0\n}",
+    );
+    let build = compile(&src, &META).unwrap();
+    let (rt, _, mut s) = load(&src);
+    s.init(&rt).unwrap();
+    let e = s.time(&rt, 1).unwrap_err();
+    assert_eq!(e.faults.len(), 2, "{e:?}");
+    assert_eq!(lines(&build, &e.faults), [Some(6), Some(4)]);
+}

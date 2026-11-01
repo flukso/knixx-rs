@@ -6,8 +6,9 @@ knixx thunder is a KNX TP1 bus device built on an
 [Adafruit Feather nRF52840 Express](https://www.adafruit.com/product/4062)
 and the knixx Thunder and Thunder Sensor boards (schematics in `pcb/`). Its
 firmware is written in Rust on [embassy](https://embassy.dev), without a
-heap. It talks to the KNX bus through an onsemi NCN5121 transceiver on
-UARTE0 at 38400 baud.
+heap but for its scripts, which add logic of your own in
+[Rhai](https://rhai.rs) without reflashing. It talks to the KNX bus
+through an onsemi NCN5121 transceiver on UARTE0 at 38400 baud.
 
 <p align="center">
   <img src="docs/img/Knixx_Thunder_00_iso_front.png" alt="knixx Thunder, front" width="32%">
@@ -61,9 +62,10 @@ UARTE0 at 38400 baud.
   The errors include:
   - a sensor or the ToF sensor that fails;
   - a full tx queue, whatever queued the command: a wall switch, a console
-    command, a sensor reading or a motion;
+    command, a sensor reading, a motion or a script;
   - a telegram without a positive L_Data.con;
-  - a configuration that falls back to the built-in default.
+  - a configuration that falls back to the built-in default;
+  - a script that fails, is stopped or does not load.
 - **Configuration.** The settings are kept in `knixx.ini` on a littlefs on
   the Feather's external QSPI flash, see [Configuration](#configuration).
   - They are edited live from the console. A change is validated, applied
@@ -74,6 +76,10 @@ UARTE0 at 38400 baud.
   and a history, see [Console](#console).
 - **BLE console.** `nus on` moves the console to the Nordic UART Service
   (NUS) on Bluetooth LE, see [BLE console](#ble-console).
+- **Scripts.** Up to four scripts in Rhai, written from a template on the
+  host, compiled to Rhai Grain bytecode and uploaded with `bolt script`,
+  see [Scripts](#scripts). Each gets every telegram on the bus and a call
+  every second, keeps its state from call to call, and sends telegrams.
 - **Updates.** Over USB through the Feather's UF2 bootloader, or over BLE
   through its DFU mode, see [Flashing](#flashing).
 
@@ -98,7 +104,8 @@ The firmware and the host tools build on macOS and Linux.
 - On Linux, access to `/dev/ttyACM*` (the `dialout` group), for flashing
   and the console over USB.
 - Optional: [cargo-deny](https://github.com/EmbarkStudios/cargo-deny), for
-  `cargo deny check` (licenses: no copyleft dependencies), and
+  `cargo deny check` (licenses: permissive ones and MPL-2.0 only, see
+  [Third-party code](#third-party-code)), and
   [cargo-bloat](https://github.com/RazrFalcon/cargo-bloat).
 - For `cargo xtask golden` only: a C compiler for the host, `cc` or
   `$CC`.
@@ -115,6 +122,7 @@ cargo xtask golden   # record the VL53L7CX golden log with ST's C driver; --chec
 cargo xtask genfw    # extract the VL53L7CX firmware from ST's driver; --check compares
 cargo xtask cad      # the renders and the front plate: render, frontplate, readme, clean
 cargo test           # the host tests
+bolt script upload <script>  # build <script>.rhai and run it on the board; see Scripts
 ```
 
 ## Building
@@ -128,23 +136,25 @@ tracked files differ from it) and the build time in UTC, and writes
 `build/knixx.elf`, `build/knixx.uf2`, `build/knixx.hex` and the DFU package
 `build/knixx-dfu.zip`. It reports the flash and RAM the firmware takes, and
 fails when the image does not fit `0x26000`–`0xED000`, or on the heap rule
-below. `cargo xtask build --no-scripts` builds the firmware without scripts.
+below. `cargo xtask build --no-scripts` builds the firmware without scripts:
+about 376 KB of flash, against 673 KB with them, of which Rhai is some
+190 KB.
 
 **A heap for scripts only.** The crates in `crates/` are `no_std` without
 `alloc`, and buffers are fixed size, in statics or in the embassy tasks.
 Only the scripts in Rhai Grain allocate, from a heap of 48 KiB of their own
 (`firmware/knixx-fw/src/heap.rs`, the `scripts` feature, on by default): a
 TLSF allocator, constant time and without a lock, that serves only in thread
-mode while the script code holds its grant, and panics with `alloc outside
-Rhai Grain` otherwise, so an allocation anywhere else shows at once. `sys`
-shows the heap in use and the most used since boot. Without the `scripts`
-feature the firmware links no allocator at all, and `cargo xtask build
---no-scripts` fails if it does.
+mode while the script task holds its grant, and panics with `alloc outside
+Rhai Grain` otherwise, allocating and freeing alike, so an allocation
+anywhere else shows at once. `sys` shows the heap in use and the most used
+since boot. Without the `scripts` feature the firmware links no allocator at
+all, and `cargo xtask build --no-scripts` fails if it does.
 
-**RAM.** The statics take about 35 KiB, plus the heap with scripts, and the
-stack below them the rest, about 175 KiB with scripts and 220 KiB without:
-flip-link puts the stack at the bottom of RAM, so that an overflow faults
-instead of overwriting statics. The embassy tasks live in statics; the stack
+**RAM.** The statics take about 52 KiB without scripts and 107 KiB with
+them, the heap included; the stack below them has the rest, about 204 KiB
+without scripts and 149 KiB with them. flip-link puts the stack at the
+bottom of RAM, so that an overflow faults instead of overwriting statics. The embassy tasks live in statics; the stack
 serves `main`, the executor and the interrupt handlers. `sys` shows the most
 of it used since boot: the firmware paints the stack at boot and finds the
 lowest word that changed.
@@ -165,7 +175,10 @@ over USB and BLE.
 
 The application links at `0x26000` (`firmware/knixx-fw/memory.x`) with
 `cortex-m-rt`'s `set-vtor`, so its vector table does not depend on the MBR's
-forwarding, and RAM from `0x20000008`.
+forwarding. Its RAM starts at `0x20000008`, after the MBR's 8 bytes, with
+the panic record: 256 bytes that the UF2 bootloader, whose RAM starts at
+`0x20008000` with its stack at the top, leaves alone across a reset. The
+stack starts after it, at `0x20000108`.
 
 ## Flashing
 
@@ -218,7 +231,8 @@ USB and the BLE controller can hang.
    starts the new firmware.
 
 The packets carry as much as the negotiated ATT MTU allows, 244 bytes with
-the bootloader's MTU of 247, which sends the 364 KB image in about a minute;
+the bootloader's MTU of 247, which sent a 364 KB image in about a minute
+(the firmware with scripts is about 673 KB);
 `bolt ota --chunk` sets another size. Phone apps that speak legacy DFU, such
 as nRF Connect or Bluefruit Connect, can also send `build/knixx-dfu.zip`.
 
@@ -291,13 +305,14 @@ pulled while a terminal was open, would stall every writer, the bus with
 | `sensor` | the latest temperature, humidity and illuminance reading |
 | `tof` | the ToF state, settings, warnings, motion count and the per zone motion of the last motion frame |
 | `nus [on\|off]` | show the BLE console state, move the console to BLE NUS or back to USB |
-| `script [ls] \| rm <name> \| put <name> <size> <crc32>` | list or remove the scripts in `/scripts`; `put` receives one, as `bolt script upload` sends it |
+| `script [ls] \| info <name> \| rm <name> \| put <name> <size> <crc32>` | the scripts in `/scripts` with their state; what the board knows of one; remove one; `put` receives one, as `bolt script upload` sends it, see [Scripts](#scripts) |
 | `ota` | reboot into the bootloader for a BLE firmware update, see [Over BLE](#over-ble) |
 | `version` | the commit and build time of the firmware, `version <commit> built <date>`, also shown in the banner |
-| `sys` | the uptime, the stack high-water mark, the heap in use and at most, the bytes queued and lost on the USB and BLE console outputs, and whether a USB terminal is open (DTR) |
+| `sys` | the uptime, the stack high-water mark, the heap in use and at most, the scripts running and the telegrams dropped for them, the bytes queued and lost on the USB and BLE console outputs, and whether a USB terminal is open (DTR) |
 
 A panic resets the board; its message survives the reset in RAM and the
-next banner shows it as `last panic: ...`.
+next banner shows it as `last panic: ...`. A panic while a script ran
+names the script, which the next boot leaves out, see [Scripts](#scripts).
 
 ### BLE console
 
@@ -323,8 +338,8 @@ same, and A off + B on does `nus off`.
   typing responsive: each typed key costs one connection event for the
   write and one for the echo.
 - The banner shows on the central's first key. Output to the console,
-  including bus and sensor errors and the sniffer trace, then goes to BLE;
-  typing on USB is dropped.
+  including bus and sensor errors, the sniffer trace and what scripts
+  print, then goes to BLE; typing on USB is dropped.
 - Output goes out in notifications of 20 bytes that never split a UTF-8
   character. It is dropped while no central is subscribed, and when the link
   stays congested for 1 s.
@@ -335,8 +350,8 @@ same, and A off + B on does `nus off`.
   counted from `nus on` or the last disconnect, and on reset, since BLE is
   off at boot.
 - **Security:** NUS has no pairing: while it is on, anyone in range can
-  connect and use the console, including `config set`. Keep it on only while
-  needed.
+  connect and use the console, including `config set` and the upload of
+  scripts, which can send any group telegram. Keep it on only while needed.
 
 ## Configuration
 
@@ -453,6 +468,124 @@ config init                 restore and save the built-in default
   pulses within one look give a single LED pulse. Each pulse takes 100 ms, so
   fast motion frames fill the LED queue and the excess pulses are dropped.
 
+## Scripts
+
+Scripts add logic of your own to the board without reflashing it: up to
+four scripts in [Rhai](https://rhai.rs), which the host compiles to the
+bytecode of Rhai Grain, Rhai's bytecode VM, and the board runs on every
+telegram on the bus and every second. A script keeps its state from call to
+call and sends telegrams; the template's example follows the occupancy on
+5/0/1 with light B on 0/0/2 and switches B off 10 s after the last
+occupied.
+
+```
+bolt script new <script>                       # <script>.rhai, from the template
+bolt script build <script>                     # <script>.rhgn: checks that it compiles
+bolt script upload <script>                    # builds it, uploads it, the board runs it
+bolt script ls                                 # the scripts on the board, with their state
+bolt script info <script> [--source <script>]  # its on_info, calls, failures, last error
+bolt script rm <script>                        # stops and removes it
+```
+
+As `bolt term`, the script commands take USB if the board answers there,
+else BLE (`nus on` first); `--port`, `--ble`, `--ble-name` and `--addr` say
+which. A script is named after its file, 1 to 24 letters, digits, `-` and
+`_`; without an extension, `<script>` is `<script>.rhai`, else
+`<script>.rhgn`.
+
+### Writing a script
+
+A script defines four functions; `crates/knixx-script/template.rhai`, which
+`bolt script new` copies, documents them with an example.
+
+| function | called |
+|---|---|
+| `on_info()` | at load: returns `#{ name, author, date, compiled, version, hash }` |
+| `on_init(scope)` | at load, after on_info: sets up the scope |
+| `on_telegram(scope, tg)` | for every telegram on the bus, the board's own too |
+| `on_time(scope, uptime)` | every second, with the uptime in seconds |
+
+`scope` is an object map that persists from call to call: the script's
+state, its settings included, as functions see only their parameters. A
+function of the script's own that changes it is called on it, as
+`scope.f()`, and changes `this`; given the scope as an argument, `f(scope)`
+changes a copy. `tg` is a map: `src` and `dest` (addresses as numbers),
+`group`, `apci` (`"write"`, `"read"`, `"response"` or `"other"`),
+`priority`, `hops`, `data` (a blob, from the APCI octet on) and `own`, true
+for a telegram this board sent, such as its occupancy.
+
+| function | does |
+|---|---|
+| `ga("1/2/3")`, `ia("1.1.5")` | a group or individual address as a number |
+| `ga_str(g)`, `ia_str(a)` | the number as text |
+| `knx_write(g, data)`, `knx_response(g, data)` | sends a group value write or response; returns whether it was queued |
+| `knx_read(g)` | sends a group value read; the answer comes later, as a response telegram |
+| `dpt1(on)`, `dpt9(21.5)` | a value as telegram data |
+| `dpt1_of(data)`, `dpt9_of(data)` | the value of telegram data |
+| `blob([0, 128])` | telegram data of bytes, from the APCI octet on |
+| `data.len()`, `data[i]` | the length and the bytes of a blob |
+| `print(text)`, `debug(value)` | a line on the console, as `<script>: text` |
+
+`bolt script build` fills in `compiled` (the UTC time), `version` (the
+short commit hash of the script's git repository, `-dirty` when the file
+differs from it, `unversioned` outside one) and `hash` (the md5 of the
+source) for the placeholders `{{compiled}}`, `{{version}}` and `{{hash}}`,
+and checks that the script defines the four functions with their
+parameters, compiles to bytecode all through, and returns what it filled in
+from on_info.
+
+The board runs Rhai's bare engine with what scripts need, not Rhai's
+packages, so some of Rhai is not there: `for` loops (use `while` and
+`loop`; the compiler refuses `for`), modules, and constants at the top of a
+script, which functions cannot see. Integers are 32-bit, floats 32-bit.
+
+### Limits
+
+| limit | |
+|---|---|
+| operations per call | 1,200, about 20 ms on the board; more is an error |
+| nested calls | 8 |
+| strings, arrays, maps | 256 characters, 64 elements, 32 entries, counted over a value and what it holds, the scope too |
+| telegrams sent | 4 per call and 16 per second per script; more return false |
+| script size | 16 KiB of bytecode |
+| scripts | 4 at a time |
+
+### On the board
+
+The script task loads `/scripts/*.rhgn` at boot and runs each with its
+on_info and on_init; an upload loads the script anew at once, and
+`script rm` stops it. Each call runs on a VM of its own, holding the heap's
+grant: the 48 KiB heap is the scripts' alone.
+
+- **Failures.** A failed call is reported on the console, as
+  `script <name>: on_telegram: <error>`, and blinks red. Five failures in a
+  row of one function stop the script until it is uploaded again or the
+  board resets. `script info` shows the last error with the addresses of
+  its instructions; `bolt script info <name> --source <file>` rebuilds the
+  source as the board's was built and shows their lines.
+- **Heap.** A script whose call leaves more than 30 KiB of the heap in use
+  is stopped, freeing what it holds; one whose bytecode does not fit the
+  heap free is not loaded.
+- **Panics.** A panic while a script runs, which the limits make unlikely,
+  names the script in the panic record: the next boot leaves it out and the
+  banner says so.
+- **Status.** `script ls` shows each script's state: running, failed,
+  stopped, left out or not loaded; `script info` adds its on_info, its
+  calls, failures and longest call. `sys` counts the scripts running and
+  the telegrams dropped when the scripts fell behind.
+
+`bolt script upload` sends a script with `script put <name> <size>
+<crc32>`. The console then takes the bytes raw, without editor, echo or
+history, answers `ok <offset>` after each 128 bytes, so that BLE, without
+back-pressure, never overruns it, checks the CRC-32 at the end and writes
+`/scripts/<name>.rhgn` whole, through a temporary file (`done <size>`), or
+answers `error: ...` after a bad CRC or 5 s without a byte.
+
+Rhai Grain, Rhai's bytecode VM, came with Rhai 1.27 and is experimental.
+The board reads only bytecode written for its build of Rhai, the integer
+and float widths and the language features: build scripts with the `bolt`
+of the same repository.
+
 ## Hardware connections
 
 | function | Feather pin | nRF52840 |
@@ -475,17 +608,23 @@ The schematics of the knixx Thunder and Thunder Sensor boards are in
 
 The firmware is one embassy executor on the nRF52840, with tasks for the
 USB device and its sender, the console, the BLE controller and host, the
-bus, the sensors, the ToF sensor, the wall switches and the LEDs. The
-console, the switches, the sensors and the ToF queue commands for the bus on
-one channel of 16; the errors and the motions trigger the LEDs through a
-channel of 8. Senders never wait on a full channel.
+bus, the sensors, the ToF sensor, the wall switches, the scripts and the
+LEDs. The console, the switches, the sensors and the ToF queue commands for
+the bus on one channel of 16, the scripts their telegrams on one of 4,
+which the bus serves only when the other is empty. The bus passes every
+telegram it receives to the script task on a channel of 16. The errors and
+the motions trigger the LEDs through a channel of 8. Senders never wait on
+a full channel.
 
 ```
  console (USB CDC or BLE NUS) ─────┐
  sensor (SHT20, VCNL4040, 60 s) ───┤
- tof    (VL53L7CX INT pulses) ─────┼─► CMDS (16) ─► bus ─► NCN5121 ─► KNX TP1
- switches (wall switch presses) ───┘                 ▲  UARTE0
-                                                     └─ L_Data.con, indications
+ tof    (VL53L7CX INT pulses) ─────┼─► CMDS (16) ────────► bus ─► NCN5121 ─► KNX TP1
+ switches (wall switch presses) ───┘                     ▲ │ ▲   UARTE0
+                                                         │ │ └─ L_Data.con, indications
+ runner (scripts, 1 s) ───────────► SCRIPT_CMDS (4) ─────┘ │
+        ▲                                                  │
+        └──────────────────── TELEGRAMS (16) ◄─────────────┘
 
  main (init), tof (start, motion), errors ─► leds (8) ─► WS2812B ×2
 ```
@@ -513,7 +652,11 @@ copy of the configuration.
 
 - It takes one command at a time. A command expands into group writes, sent
   one by one, each after the previous L_Data.con or its 500 ms timeout.
-  Further commands wait until the writes are done.
+  Further commands wait until the writes are done. A script's telegram, a
+  group value write, read or response, goes the same way, from the board's
+  own address; the scripts' commands wait while the others have one.
+- It passes every valid telegram it receives to the scripts, the board's
+  own too, which the transceiver returns, marked as such.
 - It wakes on received bytes, on a command and on its next deadline (the
   L_Data.con, the stat replies, the occupancy timeout), not on a poll.
 - With `sniff on` it decodes each frame from the bus, including the echo of
@@ -713,16 +856,16 @@ folds onto the parabola y = 2x² − 1.
 | Path | Contents |
 |---|---|
 | `firmware/` | the firmware workspace, built for the nRF52840 |
-| `crates/knixx-knx` | TP1 frames, individual and group addresses, DPT 1.001/1.018 |
+| `crates/knixx-knx` | TP1 frames, individual and group addresses, DPT 1.001/1.018 and DPT 9 packing |
 | `crates/knixx-ncn` | the NCN5121 transceiver's host protocol: requests, the indication parser, their descriptions |
 | `crates/knixx-device` | the device model (switches, sensor and occupancy groups, ToF settings), its INI configuration and `default.ini` |
 | `crates/knixx-bus` | the bus engine: sending with confirmations, stat, occupancy, the sniffer; sans-IO, with an async runner |
 | `crates/knixx-cli` | the shared console commands: switch, sniff, stat, config |
-| `crates/knixx-console` | the line editor, the console output queues and the BLE NUS framing |
+| `crates/knixx-console` | the line editor, the console output queues, the BLE NUS framing and the upload protocol |
 | `crates/knixx-ui` | the status LED player and the wall switch logic |
 | `crates/knixx-sensors` | async SHT2x and VCNL4040 drivers on embedded-hal |
 | `crates/knixx-vl53l7cx` | async VL53L7CX driver, a port of ST's ULD 2.0.1 with the motion plugins; the vendored ULD and the harness that records its golden log |
-| `crates/knixx-storage` | the configuration file on littlefs |
+| `crates/knixx-storage` | the configuration file and other files, such as the scripts, on littlefs |
 | `crates/knixx-script` | scripts in Rhai Grain: the engine with its limits and the functions scripts call, loading and calling them, the compiler with its checks, and `template.rhai` |
 | `host/knixx-host` | host library: firmware images (ELF to UF2, Intel HEX, binary), UF2 files, the bootloader's drive, the USB serial port, flashing, BLE scanning, legacy DFU packages and updates |
 | `host/bolt` | host tool: `bolt convert`, `genpkg`, `ota`, `term`, `script`, `uf2`, `scan` |
@@ -738,8 +881,10 @@ folds onto the parabola y = 2x² − 1.
 cargo test
 ```
 
-runs the host tests, among them the VL53L7CX golden test and the littlefs
-tests on a NOR flash in RAM.
+runs the host tests, among them the VL53L7CX golden test, the littlefs
+tests on a NOR flash in RAM, and the scripts' tests: the template run step
+by step, the scope, the telegram, the sends and their limits, the errors
+returned rather than panics, the compiler's checks and the fault lines.
 `cargo xtask golden --check` checks the golden log against ST's C driver,
 and `cargo xtask genfw --check` the firmware files against its header.
 `cargo clippy --all-targets` and, in `firmware/`, `cargo clippy --release`
@@ -765,6 +910,10 @@ Hardware Licence Version 2 - Permissive, see [pcb/LICENSE](pcb/LICENSE) and
   `LICENSE.txt` files there. The crate ports parts of it, and its
   `firmware/` holds the sensor firmware and default settings extracted from
   it, see [crates/knixx-vl53l7cx/NOTICE](crates/knixx-vl53l7cx/NOTICE).
+- [Rhai](https://github.com/rhaiscript/rhai) and its Grain bytecode VM run
+  the scripts (MIT or Apache-2.0).
 - The littlefs C library, Nordic's MPSL and SoftDevice Controller and the
   Rust dependencies come with their own licences; `cargo deny check
-  licenses` checks that none is copyleft.
+  licenses` checks them against `deny.toml`: permissive licences, and the
+  weak copyleft MPL-2.0, which Rhai's smartstring and the host tools'
+  serialport have.

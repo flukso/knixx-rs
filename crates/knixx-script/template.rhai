@@ -6,9 +6,9 @@
 //
 // The board calls on_init once after loading the script, on_telegram for
 // every telegram on the bus and on_time every second. Each call may take
-// at most 1200 operations (about 20 ms) and send at most 4 telegrams; a
-// call that fails is reported on the console, and a script that keeps
-// failing is stopped.
+// at most 1200 operations (about 20 ms) and send at most 4 telegrams, and a
+// script at most 16 telegrams a second; a call that fails is reported on
+// the console, and a script that keeps failing is stopped.
 //
 // What a script can use:
 //
@@ -24,8 +24,8 @@
 //   data.len() data[i]            its length and its bytes
 //   print(text)                   a line on the console
 //
-// The knx_ functions return false when the bus queue is full or the call
-// has sent 4 telegrams already.
+// The knx_ functions return false when the bus queue is full, the call has
+// sent 4 telegrams already or the script 16 in this second.
 //
 // Scripts have while and loop, but no for loops.
 //

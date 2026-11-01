@@ -7,7 +7,7 @@ use std::vec::Vec;
 
 use knixx_knx::tp1::Telegram;
 use rhai::Engine;
-use rhai::grain::{Compiler, Sidecar};
+use rhai::grain::{Compiler, Fault, Sidecar};
 
 use crate::{FUNCTIONS, Host, Info, Runtime, Script};
 
@@ -135,4 +135,20 @@ pub fn compile(source: &str, meta: &Meta) -> Result<Build, CompileError> {
         sidecar: stripped.sidecar,
         info,
     })
+}
+
+/// The source lines of the instructions at addresses, as a fault on the
+/// board reports them, innermost first, by the sidecar of the build the
+/// board runs; None for an address without a line.
+pub fn lines(build: &Build, addresses: &[usize]) -> Vec<Option<u32>> {
+    let faults: Vec<Fault> = addresses
+        .iter()
+        .map(|&address| Fault { address, slot: None })
+        .collect();
+    build
+        .sidecar
+        .resolve(&faults)
+        .into_iter()
+        .map(|site| site.map(|s| s.line))
+        .collect()
 }

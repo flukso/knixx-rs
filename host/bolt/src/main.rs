@@ -215,6 +215,17 @@ enum ScriptCmd {
         #[command(flatten)]
         board: Board,
     },
+    /// Show what the board knows of a script: its on_info, calls, failures
+    /// and last error; with --source, the lines where the last error was.
+    Info {
+        name: String,
+        /// The script's source, rebuilt as the board's was to find the lines
+        /// of the fault addresses.
+        #[arg(long)]
+        source: Option<PathBuf>,
+        #[command(flatten)]
+        board: Board,
+    },
     /// List the scripts on the board.
     Ls {
         #[command(flatten)]
@@ -259,6 +270,9 @@ fn main() -> Result<()> {
             ScriptCmd::Build { script, output } => script::build(&script, output.as_deref()),
             ScriptCmd::Upload { script, name, board } => {
                 script::upload(&script, name.as_deref(), &board.target())
+            }
+            ScriptCmd::Info { name, source, board } => {
+                script::info(&name, source.as_deref(), &board.target())
             }
             ScriptCmd::Ls { board } => script::command("script ls", &board.target()),
             ScriptCmd::Rm { name, board } => script::command(&format!("script rm {name}"), &board.target()),

@@ -426,6 +426,7 @@ pub async fn task() -> ! {
             let _ = names.push(n);
         }
     });
+    rt.set_now(Instant::now().as_secs() as u32);
     for name in names {
         if Some(name) == left_out {
             with_status(name, State::LeftOut, |s| s.state = State::LeftOut);
@@ -436,7 +437,10 @@ pub async fn task() -> ! {
 
     let mut ticker = Ticker::every(Duration::from_secs(1));
     loop {
-        match select3(TELEGRAMS.receive(), ticker.next(), CONTROL.receive()).await {
+        let event = select3(TELEGRAMS.receive(), ticker.next(), CONTROL.receive()).await;
+        // The second the scripts count their sends in.
+        rt.set_now(Instant::now().as_secs() as u32);
+        match event {
             Either3::First((tg, own)) => {
                 for i in 0..SLOTS {
                     call(&rt, &mut slots, i, Callback::Telegram, |s, rt| {

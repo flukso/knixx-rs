@@ -9,7 +9,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use knixx_console::upload::{CHUNK, crc32, valid_name};
 use knixx_host::time::utc_now;
-use knixx_script::{Meta, compile};
+use knixx_script::{Meta, compile, lines};
 use md5::{Digest, Md5};
 
 use crate::client::{Client, Target};
@@ -209,6 +209,82 @@ pub fn upload(path: &Path, name: Option<&str>, t: &Target) -> Result<()> {
     })
 }
 
+/// The value of the field key in the output of script info.
+fn field<'a>(out: &'a str, key: &str) -> Option<&'a str> {
+    out.lines()
+        .find_map(|l| l.strip_prefix(key)?.strip_prefix(' '))
+        .map(str::trim)
+}
+
+/// The fault addresses of the last error in the output of script info:
+/// "(at 0x1c 0x8)".
+fn faults(out: &str) -> Vec<usize> {
+    let Some(l) = out.lines().find(|l| l.starts_with("last error")) else {
+        return Vec::new();
+    };
+    let Some(at) = l.rfind("(at ") else {
+        return Vec::new();
+    };
+    l[at + 4..]
+        .trim_end_matches(')')
+        .split_whitespace()
+        .filter_map(|a| usize::from_str_radix(a.trim_start_matches("0x"), 16).ok())
+        .collect()
+}
+
+/// Shows script info of name on the board at t; with source, the script's
+/// source, the lines of its last error too, by rebuilding it as the board's
+/// was built.
+pub fn info(name: &str, source: Option<&Path>, t: &Target) -> Result<()> {
+    let out = with_client(t, async |c| {
+        c.command(&format!("script info {name}"), Duration::from_secs(10))
+            .await
+    })?;
+    println!("{out}");
+    let Some(path) = source else {
+        return Ok(());
+    };
+    let path = &resolve(path);
+    let addresses = faults(&out);
+    if addresses.is_empty() {
+        return Ok(());
+    }
+    let text = fs::read_to_string(path).with_context(|| path.display().to_string())?;
+    let (Some(compiled), Some(version), Some(hash)) = (
+        field(&out, "compiled"),
+        field(&out, "version"),
+        field(&out, "hash"),
+    ) else {
+        bail!("the board does not show what {name} was built with");
+    };
+    if md5_hex(text.as_bytes()) != hash {
+        eprintln!(
+            "warning: {} is not the source the board runs (md5 {}, the board's {hash})",
+            path.display(),
+            md5_hex(text.as_bytes())
+        );
+    }
+    let meta = Meta {
+        compiled,
+        version,
+        hash,
+    };
+    let build = compile(&text, &meta).with_context(|| path.display().to_string())?;
+    let src: Vec<&str> = text.lines().collect();
+    println!("where, innermost first:");
+    for (a, line) in addresses.iter().zip(lines(&build, &addresses)) {
+        match line {
+            Some(n) => println!(
+                "  {}:{n}: {}",
+                path.display(),
+                src.get(n as usize - 1).map_or("", |l| l.trim())
+            ),
+            None => println!("  {a:#x}: no line"),
+        }
+    }
+    Ok(())
+}
+
 /// Runs a script command on the board at t and prints its output.
 pub fn command(line: &str, t: &Target) -> Result<()> {
     let out = with_client(t, async |c| c.command(line, Duration::from_secs(10)).await)?;
@@ -219,6 +295,16 @@ pub fn command(line: &str, t: &Target) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn info_output() {
+        let out = "name       t\ncompiled   2026-11-01T12:00:00Z\nversion    abc1234-dirty\nhash       0123\nstate      running, 9 calls, 1 failed, longest call took 812 us\nlast error on_time: Division by zero (at 0x1c 0x8)";
+        assert_eq!(field(out, "compiled"), Some("2026-11-01T12:00:00Z"));
+        assert_eq!(field(out, "version"), Some("abc1234-dirty"));
+        assert_eq!(field(out, "hash"), Some("0123"));
+        assert_eq!(faults(out), [0x1c, 0x8]);
+        assert!(faults("state      running").is_empty());
+    }
 
     #[test]
     fn md5_of_source() {

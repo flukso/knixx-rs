@@ -47,7 +47,7 @@ use rhai::grain::{Program, Vm};
 use rhai::{Blob, CallFnOptions, Dynamic, Engine, EvalAltResult, FLOAT, INT, Map, Scope};
 
 #[cfg(feature = "compiler")]
-pub use compile::{Build, CompileError, Meta, compile};
+pub use compile::{Build, CompileError, Meta, compile, lines};
 pub use rhai::grain::{ReadError, Sidecar};
 
 /// The most operations of one call: about 20 ms on the board, which runs
@@ -61,6 +61,10 @@ pub const MAX_ARRAY: usize = 64;
 pub const MAX_MAP: usize = 32;
 /// The most telegrams one call can send.
 pub const MAX_SENDS: u32 = 4;
+/// The most telegrams a script can send in one second of the uptime, which
+/// the runtime has from set_now: a script answering its own telegrams sends
+/// at most this many.
+pub const MAX_RATE: u32 = 16;
 
 /// The functions every script defines, with their number of parameters.
 pub const FUNCTIONS: [(&str, usize); 4] =
@@ -80,10 +84,12 @@ pub trait Host {
 /// The state the engine's functions share with the runtime.
 struct Shared {
     host: Box<dyn Host>,
-    /// The sends of the call in progress.
+    /// The sends of the call in progress, and how many it may make: at
+    /// most MAX_SENDS, and fewer near MAX_RATE.
     sends: u32,
+    allowed: u32,
     /// The sends refused since the runtime was made: by the host, or over
-    /// MAX_SENDS in one call.
+    /// the limits.
     refused: u32,
 }
 
@@ -91,6 +97,8 @@ struct Shared {
 pub struct Runtime {
     engine: Engine,
     shared: Rc<RefCell<Shared>>,
+    /// The second of the uptime, for MAX_RATE.
+    now: core::cell::Cell<u32>,
 }
 
 impl Runtime {
@@ -100,6 +108,7 @@ impl Runtime {
         let shared = Rc::new(RefCell::new(Shared {
             host: Box::new(host),
             sends: 0,
+            allowed: 0,
             refused: 0,
         }));
         let mut engine = Engine::new_raw();
@@ -110,7 +119,16 @@ impl Runtime {
             .set_max_array_size(MAX_ARRAY)
             .set_max_map_size(MAX_MAP);
         register(&mut engine, &shared);
-        Runtime { engine, shared }
+        Runtime {
+            engine,
+            shared,
+            now: core::cell::Cell::new(0),
+        }
+    }
+
+    /// Sets the second of the uptime that the calls count their sends in.
+    pub fn set_now(&self, secs: u32) {
+        self.now.set(secs);
     }
 
     /// The sends refused since the runtime was made.
@@ -190,8 +208,8 @@ fn hundredths(v: FLOAT) -> i32 {
     h.clamp(i32::MIN as FLOAT, i32::MAX as FLOAT) as i32
 }
 
-/// Sends a group value service with data to group g, if the call has not
-/// sent MAX_SENDS already and the host takes it.
+/// Sends a group value service with data to group g, if the call may send
+/// one more and the host takes it.
 fn send(shared: &RefCell<Shared>, g: INT, apci: Apci, data: &[u8]) -> Result<bool, Box<EvalAltResult>> {
     if !(1..=0xffff).contains(&g) {
         return Err(format!("group address {g} out of range").into());
@@ -212,7 +230,7 @@ fn send(shared: &RefCell<Shared>, g: INT, apci: Apci, data: &[u8]) -> Result<boo
         return Err("no data".into());
     }
     let mut s = shared.borrow_mut();
-    if s.sends >= MAX_SENDS {
+    if s.sends >= s.allowed {
         s.refused += 1;
         return Ok(false);
     }
@@ -314,6 +332,9 @@ pub struct Script {
     scope: Dynamic,
     /// Rhai's scope of the calls; the scripts keep nothing in it.
     rhai_scope: Scope<'static>,
+    /// The second of the uptime of the last call, and the sends since.
+    second: u32,
+    sent: u32,
 }
 
 impl Script {
@@ -325,6 +346,8 @@ impl Script {
             program,
             scope: Dynamic::from_map(Map::new()).into_shared(),
             rhai_scope: Scope::new(),
+            second: 0,
+            sent: 0,
         })
     }
 
@@ -338,15 +361,27 @@ impl Script {
         name: &'static str,
         args: impl rhai::FuncArgs,
     ) -> Result<Dynamic, Error> {
-        rt.shared.borrow_mut().sends = 0;
+        let now = rt.now.get();
+        if now != self.second {
+            self.second = now;
+            self.sent = 0;
+        }
+        {
+            let mut s = rt.shared.borrow_mut();
+            s.sends = 0;
+            s.allowed = MAX_SENDS.min(MAX_RATE.saturating_sub(self.sent));
+        }
         let mut vm = Vm::new(&rt.engine);
         let opts = CallFnOptions::new().eval_ast(false);
-        vm.call_fn_with_options::<Dynamic>(opts, &mut self.rhai_scope, &self.program, name, args)
+        let r = vm
+            .call_fn_with_options::<Dynamic>(opts, &mut self.rhai_scope, &self.program, name, args)
             .map_err(|e| Error {
                 call: name,
                 text: e.to_string(),
                 faults: vm.fault_trace().iter().map(|f| f.address).collect(),
-            })
+            });
+        self.sent += rt.shared.borrow().sends;
+        r
     }
 
     /// Calls on_info.

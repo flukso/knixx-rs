@@ -8,9 +8,12 @@
 //!     cycle   build, then flash n times, checking USB and BLE after each
 //!     golden  record the VL53L7CX golden log with ST's C driver
 //!     genfw   extract the VL53L7CX firmware from ST's vl53l7cx_buffers.h
+//!     cad     the renders and the front plate, with the Python tools in cad/
 //!
 //! The firmware is built in firmware/, a workspace of its own for the
 //! nRF52840, stamped with the git commit and the build time.
+
+mod cad;
 
 use std::env;
 use std::fs;
@@ -42,6 +45,8 @@ tasks:
           C driver and the harness; --check only compares [$CC, default cc]
   genfw   extract crates/knixx-vl53l7cx/firmware/*.bin from ST's
           vl53l7cx_buffers.h; --check only compares
+  cad     render|frontplate|readme|clean: the renders and the front plate
+          into build/cad/ [--step <model.step>, $PY]
   cycle   build, then flash <n> times; after each flash the board must
           report its version over USB and advertise as knixx over BLE
 ";
@@ -54,6 +59,7 @@ fn main() -> Result<()> {
         Some("cycle") => cycle(&args[1..]),
         Some("golden") => golden(&args[1..]),
         Some("genfw") => genfw(&args[1..]),
+        Some("cad") => cad::run(&args[1..]),
         Some("ota") => {
             build()?;
             let mut a = vec!["ota".to_string(), "--zip".into(), "build/knixx-dfu.zip".into()];

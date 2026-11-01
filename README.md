@@ -113,6 +113,7 @@ cargo xtask term     # a terminal on the console, on USB, else BLE; --usb, --ble
 cargo xtask cycle N  # build, then flash N times, checking USB and BLE after each
 cargo xtask golden   # record the VL53L7CX golden log with ST's C driver; --check compares
 cargo xtask genfw    # extract the VL53L7CX firmware from ST's driver; --check compares
+cargo xtask cad      # the renders and the front plate: render, frontplate, readme, clean
 cargo test           # the host tests
 ```
 
@@ -607,19 +608,26 @@ the `nus` command, as it alone moves the console.
 
 ## Renders and front plate
 
-The tools in `cad/` write their outputs to `build/cad/`, named after the 3D
-model of the assembled boards, `pcb/Knixx_Thunder_00.step` unless `STEP=`
-points elsewhere. The model is not in the repository, and `.gitignore`
-keeps any `pcb/*.step` out of it. The tools install their Python packages
-(OpenCascade, PyVista) in a venv in `cad/`.
+```
+cargo xtask cad <render|frontplate|readme|clean> [--step <model.step>]
+```
 
-- `make -C cad render` renders the model from five angles, with a
+runs the Python tools in `cad/`, which write their outputs to `build/cad/`,
+named after the 3D model of the assembled boards, `pcb/Knixx_Thunder_00.step`
+unless `--step` names another. The model is not in the repository, and
+`.gitignore` keeps any `pcb/*.step` out of it. The tools run in a venv,
+`cad/.venv`, which the first run makes with the newest Python from 3.14 down
+to 3.11 on the `PATH` (or `$PY`) and fills with `cad/requirements.txt`
+(OpenCascade, PyVista); it is made again when the requirements change.
+`cargo xtask cad clean` removes it.
+
+- `cargo xtask cad render` renders the model from five angles, with a
   transparent background: `<model>_{iso_front,iso_back,top,bottom,side}.png`.
   It needs the model.
-- `make -C cad readme` renders and copies the PNGs that this README shows to
-  `docs/img/`, which is tracked.
+- `cargo xtask cad readme` renders, makes the front plate and copies the
+  PNGs that this README shows to `docs/img/`, which is tracked.
 
-`make -C cad frontplate` makes the front plate. The plate needs no model:
+`cargo xtask cad frontplate` makes the front plate. The plate needs no model:
 its dimensions, below, are constants at the top of `cad/frontplate.py`. With
 the model present, the plate is first checked against it: the switch axes
 must be 40 mm apart, like the holes, and the VL53L7CX must sit
@@ -639,8 +647,10 @@ mismatch stops it before it writes anything. It makes:
 - `<model>_sampler.png`: the sampler in grey on a transparent background,
   shown below.
 - `<model>_assembly.step`, only with the model: the boards with the plate.
-  `make -C cad render STEP=../build/cad/Knixx_Thunder_00_assembly.step`
-  renders it.
+  `cargo xtask cad render --step build/cad/Knixx_Thunder_00_assembly.step`
+  renders it. OpenCascade writes its colour styles in a different order on
+  each run, so the assembly is not byte for byte the same from one run to
+  the next.
 
 The DXFs are R12 in mm, with the plate's lower-left corner at the origin:
 lines, circles and arcs for the outline on layer 0, and the curve on layer

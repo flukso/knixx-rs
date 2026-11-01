@@ -2,3 +2,7 @@
 /firmware/target/
 /build/
 .DS_Store
+# the venv of the CAD tools
+/cad/.venv/
+# the boards' 3D models, which are not published
+/pcb/*.step

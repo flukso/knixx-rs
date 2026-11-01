@@ -160,8 +160,14 @@ impl knixx_cli::Ctx for Ctx {
         DEVICE.lock(|d| d.set(Some(dev)));
     }
 
+    /// Queues cmd for the bus. A full queue, which the caller reports on
+    /// the console, also blinks red, as it does for the sensors and the ToF.
     fn send(&mut self, cmd: Command) -> bool {
-        CMDS.try_send(cmd).is_ok()
+        let ok = CMDS.try_send(cmd).is_ok();
+        if !ok {
+            leds::signal(Mode::Error);
+        }
+        ok
     }
 
     fn flags(&self) -> &Flags {

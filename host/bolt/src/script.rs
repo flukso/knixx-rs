@@ -108,6 +108,7 @@ fn build_file(path: &Path) -> Result<Vec<u8>> {
 /// Builds the script at path into output, by default next to it with the
 /// extension rhgn.
 pub fn build(path: &Path, output: Option<&Path>) -> Result<()> {
+    let path = &resolve(path);
     let artifact = build_file(path)?;
     let out = output.map_or_else(|| path.with_extension(EXT), Path::to_path_buf);
     fs::write(&out, &artifact).with_context(|| out.display().to_string())?;
@@ -115,9 +116,26 @@ pub fn build(path: &Path, output: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
+/// The file path names: path itself, or without an extension, path.rhai or
+/// else path.rhgn.
+fn resolve(path: &Path) -> PathBuf {
+    if path.exists() || path.extension().is_some() {
+        return path.to_path_buf();
+    }
+    for ext in ["rhai", EXT] {
+        let p = path.with_extension(ext);
+        if p.exists() {
+            return p;
+        }
+    }
+    path.to_path_buf()
+}
+
 /// The bytecode of path, built when it is a source, and the name of the
-/// script, from the file's name unless given.
+/// script, from the file's name unless given. Without an extension, path is
+/// path.rhai, or else path.rhgn.
 fn bytecode(path: &Path, name: Option<&str>) -> Result<(String, Vec<u8>)> {
+    let path = &resolve(path);
     let name = match name {
         Some(n) => n.to_string(),
         None => path
@@ -219,6 +237,12 @@ mod tests {
         assert!(!data.is_empty());
         // Outside a git repository the version says so.
         assert_eq!(version(&path), "unversioned");
+        // Without an extension: the source, else the bytecode.
+        assert_eq!(resolve(&dir.join("t")), path);
+        fs::remove_file(&path).unwrap();
+        fs::write(dir.join("t.rhgn"), &data).unwrap();
+        assert_eq!(resolve(&dir.join("t")), dir.join("t.rhgn"));
+        assert_eq!(bytecode(&dir.join("t"), None).unwrap(), ("t".to_string(), data));
         fs::remove_dir_all(&dir).unwrap();
     }
 }

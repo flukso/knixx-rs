@@ -206,7 +206,8 @@ enum ScriptCmd {
     /// Upload a script, built first when it is source, to the board's
     /// /scripts.
     Upload {
-        /// The script: source (.rhai) or bytecode (.rhgn).
+        /// The script: source (.rhai) or bytecode (.rhgn); without an
+        /// extension, <script>.rhai, else <script>.rhgn.
         script: PathBuf,
         /// The script's name on the board; the file's name by default.
         #[arg(long)]

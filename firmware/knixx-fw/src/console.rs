@@ -205,7 +205,7 @@ const fn commands() -> [Cmd<Ctx>; knixx_cli::NUM_SHARED + 7] {
         },
         Cmd {
             name: "script",
-            help: "script [ls] | rm <name> | put <name> <size> <crc32>: the scripts in /scripts",
+            help: "script [ls] | info <name> | rm <name> | put <name> <size> <crc32>: the scripts in /scripts",
             run: crate::script::command,
         },
         Cmd {
@@ -248,6 +248,12 @@ fn sys(_: &mut Ctx, args: &[&str], w: &mut dyn Write) -> Action {
             w,
             "heap       {used} of {} bytes in use, {peak} at most",
             crate::heap::SIZE
+        );
+        let _ = writeln!(
+            w,
+            "scripts    {} running, {} telegrams dropped",
+            crate::runner::count(),
+            crate::runner::DROPPED.load(Ordering::Relaxed)
         );
     }
     for (name, q) in [("usb out", &usbcdc::OUT), ("nus out", &nus::OUT)] {
@@ -341,7 +347,7 @@ struct Console {
     usb_session: u32,
     /// The connection state of the central that the console last saw.
     was_connected: bool,
-    last_panic: Option<&'static str>,
+    last_panic: Option<panic::Last>,
     ctx: Ctx,
     /// The upload in progress, which takes the console's input meanwhile,
     /// and the buffer it fills.
@@ -418,7 +424,12 @@ impl Console {
                 return;
             }
             Some(Event::Done(n)) => match script::store(name.as_str(), &self.stage[..n]) {
-                Ok(()) => writeln!(Out, "done {n}"),
+                Ok(()) => {
+                    // The script task runs it, anew if it ran.
+                    #[cfg(feature = "scripts")]
+                    let _ = crate::runner::CONTROL.try_send(crate::runner::Control::Load(name));
+                    writeln!(Out, "done {n}")
+                }
                 Err(e) => writeln!(Out, "error: {e}"),
             },
             Some(Event::BadCrc) => writeln!(Out, "error: CRC mismatch, {size} bytes dropped"),
@@ -526,8 +537,15 @@ impl Console {
             BOOT_LOG.lock(|l| {
                 let _ = Out.write_str(core::str::from_utf8(l.borrow().as_bytes()).unwrap_or(""));
             });
-            if let Some(m) = self.last_panic {
-                let _ = writeln!(Out, "last panic: {m}");
+            if let Some(p) = self.last_panic {
+                let _ = writeln!(Out, "last panic: {}", p.msg);
+                if let Some(s) = p.script {
+                    let _ = writeln!(
+                        Out,
+                        "  in script {}, left out until it is uploaded again or the board resets",
+                        s.as_str()
+                    );
+                }
             }
             Echo.write(PROMPT.as_bytes());
             if b == b'\r' || b == b'\n' {
@@ -554,14 +572,12 @@ impl Console {
 
 #[embassy_executor::task]
 pub async fn task(mut rx: Receiver<'static, Driver<'static, HardwareVbusDetect>>) -> ! {
-    static MSG: static_cell::StaticCell<[u8; 200]> = static_cell::StaticCell::new();
-    let msg = MSG.init([0; 200]);
     let mut con = Console {
         editor: Editor::new(PROMPT),
         greeted: false,
         usb_session: 0,
         was_connected: false,
-        last_panic: panic::take_last(msg),
+        last_panic: panic::last(),
         ctx: Ctx,
         upload: None,
         stage: {

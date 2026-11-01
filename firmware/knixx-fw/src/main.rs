@@ -2,6 +2,9 @@
 #![no_std]
 #![no_main]
 
+#[cfg(feature = "scripts")]
+extern crate alloc;
+
 use embassy_executor::Spawner;
 use embassy_nrf::gpio::{Level, Output, OutputDrive};
 use embassy_nrf::interrupt::{self, InterruptExt, Priority};
@@ -21,6 +24,8 @@ mod i2c;
 mod leds;
 mod nus;
 mod panic;
+#[cfg(feature = "scripts")]
+mod runner;
 mod script;
 mod sensor;
 mod stack;
@@ -47,6 +52,7 @@ bind_interrupts!(struct Irqs {
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     stack::paint();
+    panic::latch();
     boot::sanitize();
 
     // Interrupt priorities: MPSL keeps P0 (radio, its timers) and P1 to
@@ -109,6 +115,8 @@ async fn main(spawner: Spawner) {
         Irqs,
     );
     spawner.spawn(bus::task(uart).unwrap());
+    #[cfg(feature = "scripts")]
+    spawner.spawn(runner::task().unwrap());
 
     let i2c = i2c::start(p.TWISPI1, Irqs, p.P0_12, p.P0_11);
     spawner.spawn(sensor::task(i2c).unwrap());

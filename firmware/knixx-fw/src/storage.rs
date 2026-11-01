@@ -195,7 +195,7 @@ fn with_flash<R>(
 }
 
 /// Reads the file at path into buf and returns its length.
-#[allow(dead_code)] // the script task reads the scripts
+#[cfg_attr(not(feature = "scripts"), allow(dead_code))]
 pub fn read_file(path: &str, buf: &mut [u8]) -> Result<usize, FileError> {
     with_flash(|fl| knixx_storage::read(fl, path, buf))
 }
@@ -227,4 +227,10 @@ pub fn list_dir(path: &str, mut f: impl FnMut(&str, u32)) -> Result<(), FileErro
         Err(FileError::Fs(e)) if e.not_found() => Ok(()),
         r => r,
     }
+}
+
+/// The size of the file at path, or None when there is none.
+#[cfg_attr(not(feature = "scripts"), allow(dead_code))]
+pub fn file_size(path: &str) -> Result<Option<u32>, FileError> {
+    with_flash(|fl| knixx_storage::stat(fl, path, |e| e.filter(|e| !e.dir).map(|e| e.size)))
 }

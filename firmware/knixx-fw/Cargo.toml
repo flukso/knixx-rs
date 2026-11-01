@@ -9,6 +9,7 @@ knixx-bus = { path = "../../crates/knixx-bus" }
 knixx-cli = { path = "../../crates/knixx-cli" }
 knixx-console = { path = "../../crates/knixx-console" }
 knixx-device = { path = "../../crates/knixx-device" }
+knixx-knx = { path = "../../crates/knixx-knx" }
 knixx-sensors = { path = "../../crates/knixx-sensors" }
 knixx-vl53l7cx = { path = "../../crates/knixx-vl53l7cx" }
 embedded-hal-async = "1"
@@ -28,10 +29,11 @@ nrf-sdc = { version = "0.4.0", features = ["nrf52840", "peripheral"] }
 static_cell = "2.1.1"
 heapless = "0.9"
 rlsf = { version = "0.2.3", optional = true }
+knixx-script = { path = "../../crates/knixx-script", default-features = false, features = ["no_std"], optional = true }
 trouble-host = { version = "0.8.0", default-features = false, features = ["peripheral", "gatt", "default-packet-pool", "derive"] }
 
 [features]
 default = ["scripts"]
 # Scripts in Rhai Grain, with the heap that only they use. Without it the
 # firmware links no allocator.
-scripts = ["dep:rlsf"]
+scripts = ["dep:rlsf", "dep:knixx-script"]

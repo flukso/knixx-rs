@@ -51,6 +51,11 @@ impl Output for Console {
     fn failed(&mut self) {
         leds::signal(Mode::Error);
     }
+
+    #[cfg(feature = "scripts")]
+    fn telegram(&mut self, tg: &knixx_knx::tp1::Telegram, own: bool) {
+        crate::runner::telegram(tg, own);
+    }
 }
 
 /// Sets up the UART and returns it for the bus task.

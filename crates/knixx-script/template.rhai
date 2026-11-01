@@ -56,7 +56,10 @@ fn on_info() {
 fn on_init(scope) {
     scope.occupancy = ga("5/0/1");
     scope.light = ga("0/0/2");
-    // B's state, as the bus last showed it; the read asks for it.
+    // B's state, as the bus last showed it. A read only asks: knx_read
+    // returns whether it was sent, and B answers later with a response,
+    // which on_telegram takes. Until then, or if B does not answer reads,
+    // B counts as off.
     scope.on = false;
     knx_read(scope.light);
     // The seconds after the last occupied after which B goes off. Functions

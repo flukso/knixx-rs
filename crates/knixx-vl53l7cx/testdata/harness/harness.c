@@ -9,6 +9,8 @@
  *   R <register> <length>                           read
  *   D <ms>                                          wait
  *   M <motion[0]> ... <motion[31]>                  parsed motion indicator
+ *
+ * Build and run: cargo xtask golden, which writes testdata/configure.golden.
  */
 #include <stdio.h>
 #include <stdlib.h>

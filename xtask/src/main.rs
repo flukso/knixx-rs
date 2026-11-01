@@ -6,6 +6,7 @@
 //!     ota     build, then send the DFU package over BLE with bolt ota
 //!     term    a terminal on the board's console with bolt term
 //!     cycle   build, then flash n times, checking USB and BLE after each
+//!     golden  record the VL53L7CX golden log with ST's C driver
 //!
 //! The firmware is built in firmware/, a workspace of its own for the
 //! nRF52840, stamped with the git commit and the build time.
@@ -36,6 +37,8 @@ tasks:
   ota     build, then send build/knixx-dfu.zip over BLE to a board in BLE
           DFU mode (run ota on its console) [bolt ota flags, e.g. --addr]
   term    a terminal on the console, over USB or BLE [bolt term flags]
+  golden  record crates/knixx-vl53l7cx/testdata/configure.golden with ST's
+          C driver and the harness; --check only compares [$CC, default cc]
   cycle   build, then flash <n> times; after each flash the board must
           report its version over USB and advertise as knixx over BLE
 ";
@@ -46,6 +49,7 @@ fn main() -> Result<()> {
         Some("build") => build().map(|_| ()),
         Some("flash") => flash(&args[1..]),
         Some("cycle") => cycle(&args[1..]),
+        Some("golden") => golden(&args[1..]),
         Some("ota") => {
             build()?;
             let mut a = vec!["ota".to_string(), "--zip".into(), "build/knixx-dfu.zip".into()];
@@ -182,6 +186,65 @@ fn build() -> Result<(PathBuf, Version)> {
         ram.stack_size()
     );
     Ok((out.join("knixx.uf2"), v))
+}
+
+/// Builds ST's VL53L7CX driver with the harness for the host, runs it
+/// against its fake sensor and writes its log of I2C transactions to
+/// testdata/configure.golden, which the Rust port's golden test replays.
+/// With --check it only compares the log with the file.
+fn golden(args: &[String]) -> Result<()> {
+    let check = match args {
+        [] => false,
+        [flag] if flag == "--check" => true,
+        _ => bail!("usage: cargo xtask golden [--check]"),
+    };
+    let dir = root().join("crates/knixx-vl53l7cx");
+    let uld = "VL53L7CX_ULD_driver_2.0.1/VL53L7CX_ULD_API";
+    let out = root().join("target/vl53l7cx-harness");
+    fs::create_dir_all(root().join("target"))?;
+    let cc = env::var("CC").unwrap_or_else(|_| "cc".into());
+    let status = Command::new(&cc)
+        .args(["-std=c99", "-O1", "-Itestdata/harness"])
+        .arg(format!("-I{uld}/inc"))
+        .arg("-o")
+        .arg(&out)
+        .arg("testdata/harness/harness.c")
+        .args(
+            [
+                "vl53l7cx_api.c",
+                "vl53l7cx_plugin_motion_indicator.c",
+                "vl53l7cx_plugin_detection_thresholds.c",
+            ]
+            .map(|f| format!("{uld}/src/{f}")),
+        )
+        .arg("-lm")
+        .current_dir(&dir)
+        .status()
+        .with_context(|| format!("run {cc}"))?;
+    if !status.success() {
+        bail!("the harness does not build");
+    }
+    let run = Command::new(&out).output().context("run the harness")?;
+    if !run.status.success() {
+        bail!("the harness failed: {}", String::from_utf8_lossy(&run.stderr));
+    }
+    let path = dir.join("testdata/configure.golden");
+    let old = fs::read(&path).unwrap_or_default();
+    let name = "crates/knixx-vl53l7cx/testdata/configure.golden";
+    if check {
+        if old != run.stdout {
+            bail!("{name} differs from the log of the C driver; cargo xtask golden records it");
+        }
+        eprintln!("{name}: matches the C driver");
+        return Ok(());
+    }
+    fs::write(&path, &run.stdout)?;
+    eprintln!(
+        "{name}: {} lines, {}",
+        run.stdout.iter().filter(|&&b| b == b'\n').count(),
+        if old == run.stdout { "unchanged" } else { "changed" }
+    );
+    Ok(())
 }
 
 /// Runs bolt with args in the repository root. bolt is built on its own,

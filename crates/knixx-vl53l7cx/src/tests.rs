@@ -1,6 +1,6 @@
 //! testdata/configure.golden is the log of ST's C driver in
 //! VL53L7CX_ULD_driver_2.0.1, run by testdata/harness against the fake sensor
-//! that FakeBus reimplements.
+//! that FakeBus reimplements; cargo xtask golden records it.
 
 use core::cell::RefCell;
 use core::future::Future;

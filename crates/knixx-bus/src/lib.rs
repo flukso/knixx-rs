@@ -17,13 +17,13 @@ use core::fmt::{self, Write as _};
 use core::future::pending;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use embassy_futures::select::{Either3, select3};
+use embassy_futures::select::{Either, Either3, select, select3};
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::channel::Receiver as ChannelReceiver;
 use embassy_time::{Duration, Instant, Timer};
 use knixx_device::thunder::{Device, MAX_GROUPS};
 use knixx_knx::GroupAddress;
-use knixx_knx::tp1::{self, MAX_FRAME};
+use knixx_knx::tp1::{self, AddrType, Apci, MAX_FRAME, Telegram};
 use knixx_ncn::{self as ncn, Parser, Service, TxBuf};
 
 use decode::Decoder;
@@ -31,6 +31,10 @@ use format::{Line, Write, bool_write, f16_write};
 
 /// The length of the command queue.
 pub const QUEUE_LEN: usize = 16;
+
+/// The length of the scripts' command queue, which the engine serves after
+/// the command queue.
+pub const SCRIPT_QUEUE_LEN: usize = 4;
 
 /// Bounds the wait for the L_Data.con of a sent telegram. It covers the
 /// NCN5121's worst case of 3 NACK and 3 BUSY repetitions.
@@ -79,14 +83,23 @@ pub enum Command {
     Motion,
     /// Publishes the illuminance in tenths of a lux to the illuminance group.
     Light { illuminance: i32 },
+    /// Sends a telegram from a script: a group value write, read or response
+    /// to a group, with its data from the APCI octet on, as Telegram holds
+    /// it. The engine sends it from the device's individual address, without
+    /// repetition and as an unnumbered data packet; it keeps the priority.
+    Send(Telegram),
 }
 
-/// Receives everything the engine prints.
+/// Receives everything the engine prints, and the telegrams on the bus.
 pub trait Output {
     /// Writes a whole line, ending in "\n".
     fn write(&mut self, b: &[u8]);
     /// Is called for each error the engine reports.
     fn failed(&mut self);
+    /// Is called with each valid telegram received, the device's own too:
+    /// the transceiver returns each telegram it sends, and own tells those
+    /// from the others, by their source address.
+    fn telegram(&mut self, _tg: &Telegram, _own: bool) {}
 }
 
 /// Prints an error line on out and reports it to out.failed.
@@ -145,14 +158,18 @@ struct Receiver {
 }
 
 impl Receiver {
-    /// Reports the services data contains. Frames are decoded only while
-    /// sniffing.
+    /// Reports the services data contains, and passes each valid telegram on
+    /// to out. Frames are decoded for the trace only while sniffing.
     fn handle(&mut self, data: &[u8], dev: &Device, sniff: &AtomicBool, out: &mut impl Output) {
         for &b in data {
             let Some((s, v)) = self.parser.feed(b) else {
                 continue;
             };
             if s == Service::LDataInd {
+                let mut tg = Telegram::default();
+                if tg.unpack(self.parser.frame()).is_ok() {
+                    out.telegram(&tg, tg.src == dev.individual);
+                }
                 if sniff.load(Ordering::Relaxed) {
                     self.line.clear();
                     self.line.push_str("  ");
@@ -190,6 +207,23 @@ enum SendError {
     Ncn(ncn::Error),
 }
 
+/// Why the engine refuses a telegram of a script.
+fn refuse(tg: &Telegram) -> Option<&'static str> {
+    if tg.npci.addr_type != AddrType::Group || tg.dest == 0 {
+        return Some("not to a group");
+    }
+    if !matches!(
+        tg.apci,
+        Apci::GroupValueWrite | Apci::GroupValueRead | Apci::GroupValueResponse
+    ) {
+        return Some("not a group value write, read or response");
+    }
+    if tg.npci.length == 0 || tg.npci.length as usize > tp1::MAX_PAYLOAD {
+        return Some("bad data length");
+    }
+    None
+}
+
 impl fmt::Display for SendError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -209,7 +243,11 @@ impl Sender {
     /// Builds the request of the group value write of data to group in req
     /// and returns its length.
     fn send(&mut self, dev: &Device, group: u16, data: &[u8]) -> Result<usize, SendError> {
-        let tg = dev.group_write(group, data);
+        self.send_telegram(&dev.group_write(group, data))
+    }
+
+    /// Builds the request of tg in req and returns its length.
+    fn send_telegram(&mut self, tg: &Telegram) -> Result<usize, SendError> {
         let buf = tg.pack_to(&mut self.frame).map_err(SendError::Tp1)?;
         let req = ncn::tx_data(buf, &mut self.req).map_err(SendError::Ncn)?;
         Ok(req.len())
@@ -237,6 +275,8 @@ pub struct Engine<'a> {
     queue: [Write; MAX_GROUPS],
     nq: usize,
     next: usize,
+    /// The telegram of a script, before it is sent.
+    script: Option<Telegram>,
     /// Whether the L_Data.con for group is awaited, until con_deadline.
     awaiting: bool,
     group: u16,
@@ -267,6 +307,7 @@ impl<'a> Engine<'a> {
             queue: [Write::default(); MAX_GROUPS],
             nq: 0,
             next: 0,
+            script: None,
             awaiting: false,
             group: 0,
             con_deadline: Instant::MIN,
@@ -286,7 +327,7 @@ impl<'a> Engine<'a> {
     /// Reports whether the engine takes the next command: no telegram is
     /// pending or awaited and no stat is in progress.
     pub fn accepts_commands(&self) -> bool {
-        self.next >= self.nq && !self.awaiting && !self.stat_req && !self.rx.stat
+        self.next >= self.nq && self.script.is_none() && !self.awaiting && !self.stat_req && !self.rx.stat
     }
 
     /// Executes cmd. The caller passes commands only while
@@ -342,6 +383,17 @@ impl<'a> Engine<'a> {
                 self.next = 0;
             }
             Command::Stat => self.stat_req = true,
+            Command::Send(tg) => {
+                if let Some(why) = refuse(&tg) {
+                    let g = GroupAddress(tg.dest);
+                    errorln(&mut self.rx.line, out, format_args!("bus: send to {g}: {why}"));
+                    return;
+                }
+                let mut t = self.cur.group_write(tg.dest, tg.data());
+                t.apci = tg.apci;
+                t.ctrl.priority = tg.ctrl.priority;
+                self.script = Some(t);
+            }
             Command::Config(dev) => {
                 self.cur = dev;
                 self.rx.dec.reset();
@@ -424,6 +476,18 @@ impl<'a> Engine<'a> {
                 self.next = 0;
             }
         }
+        if let Some(t) = self.script.take() {
+            self.group = t.dest;
+            match self.tx.send_telegram(&t) {
+                Ok(n) => {
+                    self.awaiting = true;
+                    self.rx.got_con = false;
+                    self.con_deadline = now + CON_TIMEOUT;
+                    return Some(&self.tx.req[..n]);
+                }
+                Err(e) => errorln(&mut self.rx.line, out, format_args!("{e}")),
+            }
+        }
         while self.next < self.nq {
             let w = self.queue[self.next];
             self.next += 1;
@@ -472,13 +536,16 @@ impl<'a> Engine<'a> {
 }
 
 /// Runs engine over uart: it transmits what the engine has to send and
-/// passes it the bytes received, the commands from cmds while it takes them,
-/// and its deadlines. The UART's read must be cancel-safe: it is dropped when
-/// a command or a deadline comes first.
-pub async fn run<U, M, const N: usize>(
+/// passes it the bytes received, the commands while it takes them, and its
+/// deadlines. The commands come from cmds, and from scripts when cmds has
+/// none, so that scripts never hold up the switches and the sensors. The
+/// UART's read must be cancel-safe: it is dropped when a command or a
+/// deadline comes first.
+pub async fn run<U, M, const N: usize, const S: usize>(
     uart: &mut U,
     engine: &mut Engine<'_>,
     cmds: &ChannelReceiver<'_, M, Command, N>,
+    scripts: &ChannelReceiver<'_, M, Command, S>,
     out: &mut impl Output,
 ) -> !
 where
@@ -505,7 +572,10 @@ where
         let deadline = engine.deadline();
         let cmd = async {
             if accept {
-                cmds.receive().await
+                // select prefers its first future when both are ready.
+                match select(cmds.receive(), scripts.receive()).await {
+                    Either::First(c) | Either::Second(c) => c,
+                }
             } else {
                 pending().await
             }

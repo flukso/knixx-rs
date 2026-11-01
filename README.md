@@ -525,8 +525,8 @@ copy of the configuration.
   middle group, when they agree, for example `(DPT 9.001: 21.50 °C)` for
   2/0/7 with the default configuration. When a value does not unpack with
   that DPT, only the raw data is printed.
-- Received bytes land in a 256-byte ring by EasyDMA, so none are lost while
-  the flash erases.
+- Received bytes land in a 1 KiB ring by EasyDMA, about 267 ms of a busy
+  bus, so none are lost while the flash erases or a script runs.
 
 ### Sensors
 

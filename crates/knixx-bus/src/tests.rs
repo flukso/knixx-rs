@@ -41,11 +41,12 @@ impl FakeDevice {
     }
 }
 
-/// Captures the output and counts the errors.
+/// Captures the output, counts the errors and records the telegrams.
 #[derive(Default)]
 pub(crate) struct Capture {
     pub(crate) text: String,
     pub(crate) errors: u32,
+    pub(crate) telegrams: Vec<(Telegram, bool)>,
 }
 
 impl Output for Capture {
@@ -56,6 +57,10 @@ impl Output for Capture {
 
     fn failed(&mut self) {
         self.errors += 1;
+    }
+
+    fn telegram(&mut self, tg: &Telegram, own: bool) {
+        self.telegrams.push((*tg, own));
     }
 }
 
@@ -557,4 +562,117 @@ fn f16_write_values() {
     }
     let w = bool_write(1, true);
     assert_eq!(w.data(), [1], "bool_write(true)");
+}
+
+/// Returns the frame of tg, as the transceiver passes it on in an
+/// L_Data.ind.
+fn ind(tg: &Telegram) -> Vec<u8> {
+    let mut frame = [0; knixx_knx::tp1::MAX_FRAME];
+    tg.pack_to(&mut frame).unwrap().to_vec()
+}
+
+#[test]
+fn telegrams_reach_the_output() {
+    let dev = test_device();
+    let mut foreign = dev.group_write(0x0902, &[0x0c, 0x5a]);
+    foreign.src = 0x1105;
+    let own = dev.telegram(0x0002, true);
+    for sniff in [false, true] {
+        let flags = Flags::new();
+        flags.sniff.store(sniff, Ordering::Relaxed);
+        let mut engine = Engine::new(dev, &flags);
+        let mut out = Capture::default();
+        let mut bad = ind(&foreign);
+        *bad.last_mut().unwrap() ^= 0xff; // a wrong checksum
+        // Split across reads, as the UART may deliver them.
+        let all = [ind(&foreign), bad, ind(&own)].concat();
+        let (a, b) = all.split_at(5);
+        engine.feed(a, T0, &mut out);
+        engine.feed(b, T0, &mut out);
+        assert_eq!(out.telegrams, [(foreign, false), (own, true)], "sniff={sniff}");
+    }
+}
+
+/// A telegram from a script, before the engine fixes its source and form.
+fn script_telegram(dest: u16, apci: tp1::Apci, data: &[u8]) -> Telegram {
+    let mut tg = Telegram {
+        src: 0x1234,
+        dest,
+        npci: tp1::Npci {
+            addr_type: tp1::AddrType::Group,
+            routing: 6,
+            length: 0,
+        },
+        ctrl: tp1::Ctrl {
+            repeat: false,
+            priority: tp1::Priority::Low,
+        },
+        apci,
+        ..Telegram::default()
+    };
+    tg.set_data(data).unwrap();
+    tg
+}
+
+#[test]
+fn send_from_a_script() {
+    let dev = test_device();
+    let flags = Flags::new();
+    let write = script_telegram(0x0909, tp1::Apci::GroupValueWrite, &[0x01]);
+    let read = script_telegram(0x0909, tp1::Apci::GroupValueRead, &[0x00]);
+    let mut response = script_telegram(0x0909, tp1::Apci::GroupValueResponse, &[0x00, 0x0c, 0x5a]);
+    response.ctrl.priority = tp1::Priority::High;
+    let mut d = FakeDevice {
+        confirm: true,
+        ..FakeDevice::default()
+    };
+    let got = run(
+        &mut d,
+        &dev,
+        &flags,
+        &[Command::Send(write), Command::Send(read), Command::Send(response)],
+    );
+    // The device's source address, its routing and transport, one at a time
+    // after each L_Data.con.
+    let mut want_read = dev.group_write(0x0909, &[0x00]);
+    want_read.apci = tp1::Apci::GroupValueRead;
+    let mut want_response = dev.group_write(0x0909, &[0x00, 0x0c, 0x5a]);
+    want_response.apci = tp1::Apci::GroupValueResponse;
+    want_response.ctrl.priority = tp1::Priority::High;
+    let want = cat(&[
+        &request(&dev.group_write(0x0909, &[0x01])),
+        &request(&want_read),
+        &request(&want_response),
+    ]);
+    assert_eq!(d.written, want);
+    assert!(!d.overlap, "a frame was sent before the previous L_Data.con");
+    assert_eq!((got.errors, got.text.as_str()), (0, ""));
+}
+
+#[test]
+fn send_refused() {
+    let dev = test_device();
+    let flags = Flags::new();
+    let mut individual = script_telegram(0x1105, tp1::Apci::GroupValueWrite, &[0x01]);
+    individual.npci.addr_type = tp1::AddrType::Individual;
+    let mut empty = script_telegram(0x0909, tp1::Apci::GroupValueWrite, &[]);
+    empty.npci.length = 0;
+    for (tg, why) in [
+        (individual, "not to a group"),
+        (
+            script_telegram(0, tp1::Apci::GroupValueWrite, &[0x01]),
+            "not to a group",
+        ),
+        (
+            script_telegram(0x0909, tp1::Apci::MemoryRead, &[0x01]),
+            "not a group value write, read or response",
+        ),
+        (empty, "bad data length"),
+    ] {
+        let mut d = FakeDevice::default();
+        let got = run(&mut d, &dev, &flags, &[Command::Send(tg)]);
+        assert!(d.written.is_empty(), "{why}: sent {:?}", d.written);
+        assert_eq!(got.errors, 1, "{why}");
+        assert!(got.text.contains(why), "{why}: {:?}", got.text);
+    }
 }

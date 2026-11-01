@@ -1,21 +1,32 @@
 //! The KNX bus: the NCN5121 transceiver on UARTE0 (TX D0/P0.25, RX D1/P0.24)
 //! at 38400 baud, 8N1, driven by knixx_bus's engine and runner. The
-//! console, the switches and the sensors queue commands on console::CMDS;
-//! the trace and the errors go to the console, and an error blinks red.
+//! console, the switches and the sensors queue commands on console::CMDS,
+//! the scripts theirs on SCRIPT_CMDS, which the engine serves when CMDS has
+//! none; the trace and the errors go to the console, and an error blinks
+//! red.
 //!
 //! BufferedUarte receives into its RAM ring with EasyDMA while the executor
-//! is busy elsewhere, so no byte is lost while, say, the flash erases.
+//! is busy elsewhere, so no byte is lost while, say, the flash erases or a
+//! script runs: its 1 KiB hold about 267 ms of a busy bus.
 
 use embassy_nrf::buffered_uarte::{self, BufferedUarte};
 use embassy_nrf::interrupt::typelevel::Binding;
 use embassy_nrf::peripherals::{P0_24, P0_25, PPI_CH0, PPI_CH1, PPI_GROUP0, TIMER1, UARTE0};
 use embassy_nrf::uarte::{Baudrate, Config, Parity};
 use embassy_nrf::{Peri, interrupt};
-use knixx_bus::{Engine, Output};
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::channel::Channel;
+use knixx_bus::{Command, Engine, Output, SCRIPT_QUEUE_LEN};
 use knixx_ui::led::Mode;
 use static_cell::StaticCell;
 
 use crate::{console, leds};
+
+/// The commands of the scripts for the bus engine.
+pub static SCRIPT_CMDS: Channel<CriticalSectionRawMutex, Command, SCRIPT_QUEUE_LEN> = Channel::new();
+
+/// The size of the UART's receive ring.
+const RX_LEN: usize = 1024;
 
 /// The peripherals of the bus.
 pub struct Peripherals {
@@ -50,7 +61,7 @@ pub fn uart(
     let mut config = Config::default();
     config.baudrate = Baudrate::Baud38400;
     config.parity = Parity::Excluded;
-    static RX: StaticCell<[u8; 256]> = StaticCell::new();
+    static RX: StaticCell<[u8; RX_LEN]> = StaticCell::new();
     static TX: StaticCell<[u8; 64]> = StaticCell::new();
     BufferedUarte::new(
         p.uarte,
@@ -62,7 +73,7 @@ pub fn uart(
         p.txd,
         irq,
         config,
-        RX.init([0; 256]),
+        RX.init([0; RX_LEN]),
         TX.init([0; 64]),
     )
 }
@@ -70,5 +81,12 @@ pub fn uart(
 #[embassy_executor::task]
 pub async fn task(mut uart: BufferedUarte<'static>) -> ! {
     let mut engine = Engine::new(console::device(), &console::FLAGS);
-    knixx_bus::run(&mut uart, &mut engine, &console::CMDS.receiver(), &mut Console).await
+    knixx_bus::run(
+        &mut uart,
+        &mut engine,
+        &console::CMDS.receiver(),
+        &SCRIPT_CMDS.receiver(),
+        &mut Console,
+    )
+    .await
 }

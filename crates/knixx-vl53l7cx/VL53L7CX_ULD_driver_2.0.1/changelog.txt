@@ -1,0 +1,151 @@
+********************************************************************************
+*
+* STMicroelectronics - VL53L7CX - Ultra Lite Driver
+*
+********************************************************************************
+
+# Driver version history 
+
+---------------------------------------------------------------------------------------------------------------
+
+Version : 1.0.0
+Date : 10/13/2021
+Comments : Initial driver release.
+
+---------------------------------------------------------------------------------------------------------------
+
+
+Version : 1.1.0
+Date : 01/14/2022
+Comments : Several updates done in order to catch more errors from FW.
+- Result structure : Added silicon temperature output
+- Init function : Added several read registers used to improve initialization stability
+- Start function : Added a check of memory size in orer to be sure that packet size has been correctly programmed
+- Stop function : Return more relevant errors from FW
+- Check data ready function : Return more relevant errors from FW
+
+---------------------------------------------------------------------------------------------------------------
+
+
+Version : 1.2.0
+Date : 02/11/2022
+Comments : 
+- Corrected reflectance format (output divided by /2 vs previous driver version)
+- Added macro VL53L7CX_STATUS_TIMEOUT_ERROR
+- For Linux driver : Updated i2c management to have the possibility to change I2C address in user space mode
+
+
+---------------------------------------------------------------------------------------------------------------
+
+
+Version : 1.2.1
+Date : 04/28/2022
+Comments : 
+- Added a check to detect corrupted frames in function 'vl53l5cx_get_ranging_data()'
+- Added a break into function '_vl53l5cx_poll_for_answer()' to avoid endless loop
+
+
+---------------------------------------------------------------------------------------------------------------
+
+
+Version : 1.2.2
+Date : 05/02/2022
+Comments : 
+- Added +4 bytes to temporary buffer size
+
+
+---------------------------------------------------------------------------------------------------------------
+
+
+Version : 1.2.3
+Date : 07/05/2022
+- Added functions to disable internal charge pump. It allows power consumption reduction when AVDD is supplied in 3V3
+- Fixed Xtalk calibration that might failed in some conditions
+- Removed a check in function vl53l5cx_check_data_ready() that may remove valid frames
+- Updated internal sensor firmware
+
+
+---------------------------------------------------------------------------------------------------------------
+
+
+Version : 1.2.4
+Date : 10/11/2022
+Comments : 
+- Fixed MISRA errors. No impact on code or performances, only coding rules.
+
+
+---------------------------------------------------------------------------------------------------------------
+
+
+Version : 1.2.5
+Date : 01/19/2023
+- Changed licence from DUAL to full BSD3
+
+
+---------------------------------------------------------------------------------------------------------------
+
+
+Version : 1.2.6
+Date : 04/17/2023
+- Fixed bug in motion indicator: configuration was not correctly sent when resolution was changed
+- Improved specular target filtering
+
+
+---------------------------------------------------------------------------------------------------------------
+
+
+Version : 1.2.7
+Date : 04/24/2023
+- Fixed stop function that may fail when multi-sensors where used
+
+
+---------------------------------------------------------------------------------------------------------------
+
+
+Version : 1.2.8
+Date : 05/29/2023
+- Improved glare filter tuning
+
+
+---------------------------------------------------------------------------------------------------------------
+
+
+Version : 1.2.9
+Date : 06/09/2023
+- Added an error code VL53L7CX_STATUS_XTALK_FAILED when Xtalk calibration fails due to too good coverglass
+- Updated stop() function as it has been wrongly implemented in v1.3.8. Fixed issues relative to sensor stopping.
+
+
+---------------------------------------------------------------------------------------------------------------
+
+
+Version : 1.2.10
+Date : 01/24/2024
+- Added function vl53l7cx_set_VHV_repeat_count() used to enable periodic temperature compensation 
+
+
+---------------------------------------------------------------------------------------------------------------
+
+
+Version : 1.2.11
+Date : 03/20/2024
+- Reworked a bit function vl53l7cx_calibrate_xtalk() to remove C-STAT warning 
+
+
+---------------------------------------------------------------------------------------------------------------
+
+
+Version : 2.0.0
+Date : 05/21/2024
+- Update to FW MM1.8
+- Update platform function names to being with VL53L7CX to avoid clashes when using multiple devices using platform functions with the same name.
+- New VL53L7CX_buffers.h file to update spread spectrum values in default config.
+
+
+---------------------------------------------------------------------------------------------------------------
+
+
+Version : 2.0.1
+Date : 02/17/2025
+- Update the top of the files in the examples directory
+---------------------------------------------------------------------------------------------------------------

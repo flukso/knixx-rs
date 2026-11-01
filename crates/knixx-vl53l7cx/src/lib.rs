@@ -5,7 +5,7 @@
 //! use needs: initialisation, which uploads the sensor firmware, the ranging
 //! settings, the motion indicator and detection threshold plugins, and
 //! reading the motion indicator results. The functions follow the C sources
-//! (vendored in knixx-go's `src/internal/vl53l7cx/VL53L7CX_ULD_driver_2.0.1`)
+//! (vendored in `VL53L7CX_ULD_driver_2.0.1/`)
 //! step by step, and a test compares their I2C traffic with that of the C
 //! driver.
 //!

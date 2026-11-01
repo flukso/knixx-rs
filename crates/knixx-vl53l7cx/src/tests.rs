@@ -1,6 +1,6 @@
-//! testdata/configure.golden is the log of the C driver, run by knixx-go's
-//! src/internal/vl53l7cx/testdata/harness against the fake sensor that
-//! FakeBus reimplements.
+//! testdata/configure.golden is the log of ST's C driver in
+//! VL53L7CX_ULD_driver_2.0.1, run by testdata/harness against the fake sensor
+//! that FakeBus reimplements.
 
 use core::cell::RefCell;
 use core::future::Future;
@@ -362,8 +362,8 @@ fn errors_display() {
     assert_eq!(format!("{}", Error::Bus(NACK)), format!("vl53l7cx: {NACK:?}"));
 }
 
-/// Windows with their validity; knixx-go's thunder_test.go holds the same
-/// table for thunder.Occupancy.DistanceValid.
+/// Windows with their validity; knixx-device's distance_valid test holds
+/// the same table for Occupancy::distance_valid.
 const DISTANCE_PAIRS: [(u16, u16, bool); 8] = [
     (400, 1500, true),
     (400, 1900, true),

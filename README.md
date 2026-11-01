@@ -566,10 +566,6 @@ only compares them.
 4 KiB blocks, 512-byte caches and on-disk version 2.1, the filesystem the Go
 firmware made. The littlefs2 crate is not used: it pins on-disk version 2.0,
 and littlefs does not mount a filesystem of a later minor version.
-`crates/knixx-storage/testdata/golfs` makes and reads test images with the
-Go firmware's littlefs (`go run . write ../go.img`, `go run . read
-../rust.img`); the tests read the Go image, and with `UPDATE_TESTDATA=1`
-write the Rust one.
 
 At boot the firmware mounts the littlefs, writes the default configuration
 when there is no file, and shows what it did under the banner. A blank flash
@@ -731,8 +727,8 @@ folds onto the parabola y = 2x² − 1.
 cargo test
 ```
 
-runs the host tests, among them the tests of the Go packages the crates
-port, the VL53L7CX golden test and the littlefs images of the Go firmware.
+runs the host tests, among them the VL53L7CX golden test and the littlefs
+tests on a NOR flash in RAM.
 `cargo xtask golden --check` checks the golden log against ST's C driver,
 and `cargo xtask genfw --check` the firmware files against its header.
 `cargo clippy --all-targets` and, in `firmware/`, `cargo clippy --release`

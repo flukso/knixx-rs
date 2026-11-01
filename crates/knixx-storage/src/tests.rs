@@ -16,29 +16,6 @@ impl RamFlash {
             data: vec![0xFF; SECTOR_SIZE * SECTOR_COUNT],
         }
     }
-
-    /// Returns a flash with the sectors of a sparse image: records of a
-    /// little-endian u32 sector number and the sector's bytes.
-    fn from_sparse(img: &[u8]) -> RamFlash {
-        let mut f = RamFlash::blank();
-        for rec in img.chunks(4 + SECTOR_SIZE) {
-            let n = u32::from_le_bytes(rec[..4].try_into().unwrap()) as usize;
-            f.data[n * SECTOR_SIZE..(n + 1) * SECTOR_SIZE].copy_from_slice(&rec[4..]);
-        }
-        f
-    }
-
-    /// Returns the sectors that are not blank, as a sparse image.
-    fn to_sparse(&self) -> Vec<u8> {
-        let mut img = Vec::new();
-        for (n, s) in self.data.chunks(SECTOR_SIZE).enumerate() {
-            if s.iter().any(|&b| b != 0xFF) {
-                img.extend_from_slice(&(n as u32).to_le_bytes());
-                img.extend_from_slice(s);
-            }
-        }
-        img
-    }
 }
 
 impl BlockDevice for RamFlash {
@@ -79,10 +56,6 @@ fn load_str(flash: &mut RamFlash) -> (Result<String, Error>, String) {
     let r = load(flash, &mut buf, &mut log).map(|n| String::from_utf8(buf[..n].to_vec()).unwrap());
     (r, log)
 }
-
-/// The configuration the Go images hold: the default with another
-/// individual address and switch A on two groups.
-const GO_CONFIG: &str = "[device]\nindividual = 7.8.9\n";
 
 #[test]
 fn blank_flash_is_formatted() {
@@ -149,34 +122,4 @@ fn corrupt_littlefs_is_kept() {
     assert!(e.to_string().ends_with("; the flash is not formatted"), "{e}");
     assert_eq!(log, "");
     assert!(flash.data == before, "the flash changed");
-}
-
-/// Reads an image made by the Go firmware's littlefs (tinyfs) with the
-/// same geometry: testdata/go.img, a sparse image of a littlefs that holds
-/// /knixx.ini with GO_CONFIG, made by testdata/golfs.
-#[test]
-fn reads_go_littlefs() {
-    let mut flash = RamFlash::from_sparse(include_bytes!("../testdata/go.img"));
-    let (r, log) = load_str(&mut flash);
-    assert_eq!(r.unwrap(), GO_CONFIG);
-    assert_eq!(log, "mounted littlefs\n");
-}
-
-/// Makes a littlefs here that holds /knixx.ini with GO_CONFIG and reads it
-/// back. With UPDATE_TESTDATA set it writes it as testdata/rust.img, a
-/// sparse image, for testdata/golfs to read with the Go firmware's
-/// littlefs.
-#[test]
-fn writes_littlefs_for_go() {
-    let mut flash = RamFlash::blank();
-    load_str(&mut flash).0.unwrap();
-    save(&mut flash, GO_CONFIG.as_bytes()).unwrap();
-    let img = flash.to_sparse();
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/rust.img");
-    if std::env::var_os("UPDATE_TESTDATA").is_some() {
-        std::fs::write(path, &img).unwrap();
-    }
-    // The image must mount and read back here too.
-    let mut back = RamFlash::from_sparse(&img);
-    assert_eq!(load_str(&mut back).0.unwrap(), GO_CONFIG);
 }

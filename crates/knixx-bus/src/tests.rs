@@ -67,7 +67,7 @@ impl Output for Capture {
 /// The start of simulated time.
 const T0: Instant = Instant::from_secs(1000);
 
-/// Runs an engine on dev in simulated time, as Go's Run, over d: it sends
+/// Runs an engine on dev in simulated time, as run does, over d: it sends
 /// the queued commands, each once the engine takes it, transmits to d and
 /// feeds the engine what d returns, and advances the time to the engine's
 /// deadlines. It stops when nothing is left to do, or when the next deadline
@@ -88,8 +88,8 @@ pub(crate) fn run_for(
         while let Some(b) = engine.poll(now, &mut out) {
             d.write(b);
         }
-        // A command goes before what is received, as Go's select reads a
-        // queued command before the first tick reads the transceiver.
+        // A command goes before what is received: the tests queue their
+        // commands up front, and take them in a fixed order.
         if engine.accepts_commands()
             && let Some(&c) = cmd
         {

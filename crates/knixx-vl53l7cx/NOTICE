@@ -1,7 +1,7 @@
 knixx-vl53l7cx is a port of parts of STMicroelectronics' VL53L7CX ultra lite
 driver (ULD) 2.0.1, which is vendored in VL53L7CX_ULD_driver_2.0.1/, and
 firmware/ holds the sensor firmware and default settings extracted from its
-vl53l7cx_buffers.h. testdata/harness runs the C driver on the host to record
+vl53l7cx_buffers.h by cargo xtask genfw. testdata/harness runs the C driver on the host to record
 testdata/configure.golden.
 
 Copyright (c) 2021 STMicroelectronics.

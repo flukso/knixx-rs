@@ -7,6 +7,7 @@
 //!     term    a terminal on the board's console with bolt term
 //!     cycle   build, then flash n times, checking USB and BLE after each
 //!     golden  record the VL53L7CX golden log with ST's C driver
+//!     genfw   extract the VL53L7CX firmware from ST's vl53l7cx_buffers.h
 //!
 //! The firmware is built in firmware/, a workspace of its own for the
 //! nRF52840, stamped with the git commit and the build time.
@@ -39,6 +40,8 @@ tasks:
   term    a terminal on the console, over USB or BLE [bolt term flags]
   golden  record crates/knixx-vl53l7cx/testdata/configure.golden with ST's
           C driver and the harness; --check only compares [$CC, default cc]
+  genfw   extract crates/knixx-vl53l7cx/firmware/*.bin from ST's
+          vl53l7cx_buffers.h; --check only compares
   cycle   build, then flash <n> times; after each flash the board must
           report its version over USB and advertise as knixx over BLE
 ";
@@ -50,6 +53,7 @@ fn main() -> Result<()> {
         Some("flash") => flash(&args[1..]),
         Some("cycle") => cycle(&args[1..]),
         Some("golden") => golden(&args[1..]),
+        Some("genfw") => genfw(&args[1..]),
         Some("ota") => {
             build()?;
             let mut a = vec!["ota".to_string(), "--zip".into(), "build/knixx-dfu.zip".into()];
@@ -247,6 +251,121 @@ fn golden(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// The arrays of ST's vl53l7cx_buffers.h and the files of
+/// crates/knixx-vl53l7cx/firmware/ they go to.
+const FW_ARRAYS: [(&str, &str); 4] = [
+    ("VL53L7CX_FIRMWARE", "firmware.bin"),
+    ("VL53L7CX_DEFAULT_CONFIGURATION", "default_configuration.bin"),
+    ("VL53L7CX_DEFAULT_XTALK", "default_xtalk.bin"),
+    ("VL53L7CX_GET_NVM_CMD", "get_nvm_cmd.bin"),
+];
+
+/// The value of VL53L7CX_FW_NBTAR_RANGING, which the default configuration
+/// uses by name, for VL53L7CX_NB_TARGET_PER_ZONE = 1.
+const NBTAR_RANGING: u8 = 0x02;
+
+/// Extracts the byte arrays of ST's vl53l7cx_buffers.h into the binary files
+/// that knixx-vl53l7cx embeds. With --check it only compares them with the
+/// files.
+fn genfw(args: &[String]) -> Result<()> {
+    let check = match args {
+        [] => false,
+        [flag] if flag == "--check" => true,
+        _ => bail!("usage: cargo xtask genfw [--check]"),
+    };
+    let dir = root().join("crates/knixx-vl53l7cx");
+    let header = dir.join("VL53L7CX_ULD_driver_2.0.1/VL53L7CX_ULD_API/inc/vl53l7cx_buffers.h");
+    let text = fs::read_to_string(&header).with_context(|| header.display().to_string())?;
+    let arrays = c_arrays(&text);
+    let mut differ = Vec::new();
+    for (array, file) in FW_ARRAYS {
+        let data = arrays
+            .iter()
+            .find(|(n, _)| n == array)
+            .map(|(_, d)| d)
+            .with_context(|| format!("{array} not found in {}", header.display()))?;
+        let path = dir.join("firmware").join(file);
+        let same = fs::read(&path).is_ok_and(|old| old == *data);
+        if check {
+            if !same {
+                differ.push(file);
+            }
+            continue;
+        }
+        fs::write(&path, data)?;
+        eprintln!(
+            "crates/knixx-vl53l7cx/firmware/{file}: {} bytes, {}",
+            data.len(),
+            if same { "unchanged" } else { "changed" }
+        );
+    }
+    if !differ.is_empty() {
+        bail!(
+            "crates/knixx-vl53l7cx/firmware/{{{}}} differ from vl53l7cx_buffers.h; cargo xtask genfw extracts them",
+            differ.join(",")
+        );
+    }
+    if check {
+        eprintln!("crates/knixx-vl53l7cx/firmware: matches vl53l7cx_buffers.h");
+    }
+    Ok(())
+}
+
+/// Returns the `const uint8_t NAME[] = { ... };` arrays of a C header with
+/// their bytes: the hex values of one or two digits on the lines after the
+/// opening line, up to the line that ends with `};`, with
+/// VL53L7CX_FW_NBTAR_RANGING taken as its value.
+fn c_arrays(text: &str) -> Vec<(String, Vec<u8>)> {
+    let mut out = Vec::new();
+    let mut cur: Option<(String, Vec<u8>)> = None;
+    for line in text.lines() {
+        let Some((_, data)) = cur.as_mut() else {
+            cur = array_start(line).map(|n| (n.to_string(), Vec::new()));
+            continue;
+        };
+        let t = line.trim();
+        let (body, end) = match t.strip_suffix("};") {
+            Some(b) => (b, true),
+            None => (t, false),
+        };
+        let body = body.replace("VL53L7CX_FW_NBTAR_RANGING", &format!("{NBTAR_RANGING:#04x}"));
+        data.extend(hex_bytes(&body));
+        if end {
+            out.extend(cur.take());
+        }
+    }
+    out
+}
+
+/// Returns NAME of a line that opens `const uint8_t NAME[] = {`.
+fn array_start(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("const uint8_t ")?;
+    let n = rest.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))?;
+    (n > 0 && rest[n..].starts_with("[] = {")).then(|| &rest[..n])
+}
+
+/// Returns the values of the hex literals of one or two digits in s, such as
+/// 0x2 and 0xA0; a literal with more digits is not one.
+fn hex_bytes(s: &str) -> Vec<u8> {
+    let b = s.as_bytes();
+    let word = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + 2 < b.len() {
+        if b[i] == b'0' && (b[i + 1] | 0x20) == b'x' {
+            let digits = b[i + 2..].iter().take_while(|c| c.is_ascii_hexdigit()).count();
+            if (1..=2).contains(&digits) && !b.get(i + 2 + digits).is_some_and(|&c| word(c)) {
+                let v = &s[i + 2..i + 2 + digits];
+                out.push(u8::from_str_radix(v, 16).unwrap());
+                i += 2 + digits;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
 /// Runs bolt with args in the repository root. bolt is built on its own,
 /// with BLE, which xtask does without.
 fn bolt(args: &[String]) -> Result<()> {
@@ -326,7 +445,24 @@ fn cycle(args: &[String]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::utc;
+    use super::{c_arrays, hex_bytes, utc};
+
+    #[test]
+    fn hex_literals() {
+        assert_eq!(hex_bytes("0x00, 0xff,0X1a, 0x2,"), [0x00, 0xff, 0x1a, 0x02]);
+        // Not bytes: more digits, or part of a longer word.
+        assert_eq!(hex_bytes("0x123, 0x12u, 0xg1, 0x"), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn arrays() {
+        let h = "/* x */\nconst uint8_t A[] = {\n\t0x01, 0x02,\n\t0x03, VL53L7CX_FW_NBTAR_RANGING,\n};\n\
+                 static const uint8_t B[] = {\n0x09,\n};\nconst uint8_t C[] = {\n0xab };\n";
+        assert_eq!(
+            c_arrays(h),
+            [("A".to_string(), vec![1, 2, 3, 2]), ("C".to_string(), vec![0xab])]
+        );
+    }
 
     #[test]
     fn utc_dates() {

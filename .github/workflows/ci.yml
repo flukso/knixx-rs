@@ -21,6 +21,9 @@ jobs:
         # ST's C driver, built with the harness, must still produce the log
         # that the Rust port's golden test replays.
         run: cargo xtask golden --check
+      - name: VL53L7CX firmware
+        # The firmware files must be those of ST's vl53l7cx_buffers.h.
+        run: cargo xtask genfw --check
       - name: Lint
         run: |
           cargo clippy --all-targets -- -D warnings

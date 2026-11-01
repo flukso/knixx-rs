@@ -656,7 +656,7 @@ The DXFs are R12 in mm, with the plate's lower-left corner at the origin:
 lines, circles and arcs for the outline on layer 0, and the curve on layer
 `ENGRAVE`.
 
-- **Plate:** 1 mm steel, 80 × 80 mm. Ø12.2 mm holes for the toggle switch
+- **Plate:** 1.5 mm aluminium, 80 × 80 mm. Ø12.2 mm holes for the toggle switch
   bushings, 20 mm left and right of the centre.
 - **Window:** a 23.2 × 3.2 mm slot with rounded ends, centred in X and
   17.955 mm above the switch axes, on the VL53L7CX.

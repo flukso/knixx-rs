@@ -58,7 +58,7 @@ from PIL import Image, ImageDraw
 
 # Plate, in mm. X runs between the switches, +Y towards the sensor board.
 PLATE_SIZE = 80.0
-PLATE_THICKNESS = 1.0
+PLATE_THICKNESS = 1.5  # aluminium
 HOLE_DIAMETER = 12.2  # clearance for the M12 switch bushings
 HOLE_OFFSET = 20.0  # from the centre, left and right
 CUTOUT_WIDTH = 20.0  # of the rectangle; the half-circle ends add CUTOUT_HEIGHT
@@ -71,7 +71,7 @@ VL53 = "U3"
 SLOT_OFFSET = 17.955
 SLOT_TOLERANCE = 0.05
 PLATE_GAP = 3.0  # from the top of the toggle switch bodies to the plate
-PLATE_COLOR = (0.62, 0.64, 0.66)
+PLATE_COLOR = (0.77, 0.79, 0.81)  # aluminium, in the assembly
 
 # The engravings, on the DXF's ENGRAVE layer: each curve is one closed
 # polyline, centred in X and a quarter of the plate up from its bottom edge,

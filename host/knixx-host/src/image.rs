@@ -231,25 +231,42 @@ pub struct Ram {
     pub stack: (u32, u32),
     /// The statics, from __sdata to __euninit.
     pub statics: (u32, u32),
-    /// Whether the ELF links a global allocator: the firmware has none, so
-    /// that nothing allocates.
+    /// Whether the ELF links a global allocator. Only the heap of Rhai
+    /// Grain, with the scripts feature, brings one.
     pub allocator: bool,
+    /// The size of the heap, the KNIXX_HEAP symbol; 0 without one.
+    pub heap: u32,
 }
 
 /// The symbols that a global allocator brings.
 const ALLOCATOR_SYMBOLS: [&str; 3] = ["__rust_alloc", "__rg_alloc", "__rdl_alloc"];
+
+/// The heap's memory in the firmware.
+const HEAP_SYMBOL: &str = "KNIXX_HEAP";
+
+/// Reports whether name is one of the allocator symbols, plain or as rustc's
+/// v0 mangling has them, such as `_RNvCs..._7___rustc12___rust_alloc`.
+pub fn is_allocator_symbol(name: &str) -> bool {
+    ALLOCATOR_SYMBOLS
+        .iter()
+        .any(|s| name == *s || name.ends_with(&format!("{}_{s}", s.len())))
+}
 
 impl Ram {
     pub fn from_elf(data: &[u8]) -> Result<Ram, RamError> {
         let file = object::File::parse(data).map_err(|e| RamError(e.to_string()))?;
         let mut syms = BTreeMap::new();
         let mut allocator = false;
+        let mut heap = 0;
         for s in file.symbols() {
             let Ok(name) = s.name() else {
                 continue;
             };
-            if ALLOCATOR_SYMBOLS.contains(&name) {
+            if is_allocator_symbol(name) {
                 allocator = true;
+            }
+            if name == HEAP_SYMBOL {
+                heap = s.size() as u32;
             }
             if matches!(name, "_stack_end" | "_stack_start" | "__sdata" | "__euninit") {
                 syms.insert(name, s.address() as u32);
@@ -264,6 +281,7 @@ impl Ram {
             stack: (get("_stack_end")?, get("_stack_start")?),
             statics: (get("__sdata")?, get("__euninit")?),
             allocator,
+            heap,
         })
     }
 
@@ -287,6 +305,21 @@ pub struct RamError(pub String);
 mod tests {
     use super::*;
 
+    #[test]
+    fn allocator_symbols() {
+        for (name, want) in [
+            ("__rust_alloc", true),
+            ("__rg_alloc", true),
+            ("_RNvCs5fGHjzWXRav_7___rustc12___rust_alloc", true),
+            ("_RNvCs5fGHjzWXRav_7___rustc25___rdl_alloc_error_handler", false),
+            ("_RNvCs5fGHjzWXRav_7___rustc19___rust_alloc_zeroed", false),
+            ("handle_alloc_error", false),
+            ("knixx_alloc", false),
+        ] {
+            assert_eq!(is_allocator_symbol(name), want, "{name}");
+        }
+    }
+
     /// The RAM of the firmware, when cargo xtask build made its ELF file.
     #[test]
     fn firmware_ram() {
@@ -295,7 +328,8 @@ mod tests {
             return;
         };
         let ram = Ram::from_elf(&data).unwrap();
-        assert!(!ram.allocator, "the firmware links an allocator");
+        // An allocator only with the heap of Rhai Grain.
+        assert!(!ram.allocator || ram.heap > 0, "{ram:?}");
         // flip-link: the stack from the start of RAM, after the panic
         // record, up to the statics.
         assert_eq!(ram.stack.0, 0x2000_0108);

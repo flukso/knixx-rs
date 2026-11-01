@@ -27,4 +27,11 @@ nrf-mpsl = { version = "0.4.0", features = ["nrf52840", "critical-section-impl"]
 nrf-sdc = { version = "0.4.0", features = ["nrf52840", "peripheral"] }
 static_cell = "2.1.1"
 heapless = "0.9"
+rlsf = { version = "0.2.3", optional = true }
 trouble-host = { version = "0.8.0", default-features = false, features = ["peripheral", "gatt", "default-packet-pool", "derive"] }
+
+[features]
+default = ["scripts"]
+# Scripts in Rhai Grain, with the heap that only they use. Without it the
+# firmware links no allocator.
+scripts = ["dep:rlsf"]

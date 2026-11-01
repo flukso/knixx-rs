@@ -208,7 +208,7 @@ const fn commands() -> [Cmd<Ctx>; knixx_cli::NUM_SHARED + 6] {
         },
         Cmd {
             name: "sys",
-            help: "show the uptime, the stack high-water mark and the console queues",
+            help: "show the uptime, the stack and heap use and the console queues",
             run: sys,
         },
         Cmd {
@@ -234,6 +234,15 @@ fn sys(_: &mut Ctx, args: &[&str], w: &mut dyn Write) -> Action {
     let _ = writeln!(w, "uptime     {}", Uptime(Instant::now().as_secs()));
     let (size, used) = crate::stack::usage();
     let _ = writeln!(w, "stack      {used} of {size} bytes used at most");
+    #[cfg(feature = "scripts")]
+    {
+        let (used, peak) = crate::heap::usage();
+        let _ = writeln!(
+            w,
+            "heap       {used} of {} bytes in use, {peak} at most",
+            crate::heap::SIZE
+        );
+    }
     for (name, q) in [("usb out", &usbcdc::OUT), ("nus out", &nus::OUT)] {
         let (queued, lost) = q.lock(|q| {
             let q = q.borrow();

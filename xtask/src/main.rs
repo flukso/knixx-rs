@@ -35,7 +35,8 @@ const USAGE: &str = "usage: cargo xtask <task>
 
 tasks:
   build   build the firmware and write build/knixx.{elf,uf2,hex} and the
-          DFU package build/knixx-dfu.zip
+          DFU package build/knixx-dfu.zip [--no-scripts: without Rhai
+          Grain and its heap, so that no allocator is linked]
   flash   build, flash over USB and check the board runs the build
           [--port <serial port>]
   ota     build, then send build/knixx-dfu.zip over BLE to a board in BLE
@@ -54,7 +55,14 @@ tasks:
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
-        Some("build") => build().map(|_| ()),
+        Some("build") => {
+            let scripts = match &args[1..] {
+                [] => true,
+                [flag] if flag == "--no-scripts" => false,
+                _ => bail!("usage: cargo xtask build [--no-scripts]"),
+            };
+            build_with(scripts).map(|_| ())
+        }
         Some("flash") => flash(&args[1..]),
         Some("cycle") => cycle(&args[1..]),
         Some("golden") => golden(&args[1..]),
@@ -141,12 +149,23 @@ fn utc(secs: u64) -> String {
     )
 }
 
-/// Builds the firmware and writes build/knixx.elf, .uf2 and .hex. It fails
-/// when the image does not fit the application's flash.
+/// Builds the firmware, with scripts.
 fn build() -> Result<(PathBuf, Version)> {
+    build_with(true)
+}
+
+/// Builds the firmware and writes build/knixx.elf, .uf2 and .hex. It fails
+/// when the image does not fit the application's flash, and on the heap
+/// rule: with scripts the allocator is the heap of Rhai Grain; without
+/// them no allocator may be linked.
+fn build_with(scripts: bool) -> Result<(PathBuf, Version)> {
     let v = Version::now();
-    let status = Command::new(env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
-        .args(["build", "--release"])
+    let mut cargo = Command::new(env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
+    cargo.args(["build", "--release"]);
+    if !scripts {
+        cargo.arg("--no-default-features");
+    }
+    let status = cargo
         .current_dir(root().join("firmware"))
         .env("KNIXX_COMMIT", &v.commit)
         .env("KNIXX_BUILD_DATE", &v.date)
@@ -159,8 +178,11 @@ fn build() -> Result<(PathBuf, Version)> {
     let data = fs::read(&elf).with_context(|| elf.display().to_string())?;
     let img = Image::from_elf(&data)?;
     let ram = Ram::from_elf(&data)?;
-    if ram.allocator {
-        bail!("the firmware links a global allocator: something allocates on the heap");
+    if !scripts && ram.allocator {
+        bail!("the firmware links a global allocator without scripts: something allocates on the heap");
+    }
+    if scripts && ram.heap == 0 {
+        bail!("the firmware with scripts lacks its heap, KNIXX_HEAP");
     }
     if img.start() < APP_START || img.end() > APP_END {
         bail!(
@@ -191,9 +213,14 @@ fn build() -> Result<(PathBuf, Version)> {
         used * 100 / (APP_END - APP_START)
     );
     eprintln!(
-        "RAM: {} bytes of statics, {} bytes of stack, no allocator",
+        "RAM: {} bytes of statics, {} bytes of stack, {}",
         ram.statics_size(),
-        ram.stack_size()
+        ram.stack_size(),
+        if scripts {
+            format!("a heap of {} bytes for Rhai Grain in the statics", ram.heap)
+        } else {
+            "no allocator".to_string()
+        }
     );
     Ok((out.join("knixx.uf2"), v))
 }

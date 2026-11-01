@@ -42,7 +42,9 @@ jobs:
           export CPATH="$PWD/firmware/c-include"
           for c in crates/*; do (cd $c && cargo build --target thumbv7em-none-eabihf) || exit 1; done
       - name: Firmware build and size
-        run: cargo xtask build
+        run: |
+          cargo xtask build --no-scripts
+          cargo xtask build
       - name: cargo-bloat
         uses: taiki-e/install-action@v2
         with:

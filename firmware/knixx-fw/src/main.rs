@@ -15,6 +15,8 @@ mod ble;
 mod boot;
 mod bus;
 mod console;
+#[cfg(feature = "scripts")]
+mod heap;
 mod i2c;
 mod leds;
 mod nus;

@@ -127,15 +127,22 @@ builds the firmware, stamped with the git commit (with `-dirty` when
 tracked files differ from it) and the build time in UTC, and writes
 `build/knixx.elf`, `build/knixx.uf2`, `build/knixx.hex` and the DFU package
 `build/knixx-dfu.zip`. It reports the flash and RAM the firmware takes, and
-fails when the image does not fit `0x26000`–`0xED000` or the firmware links
-a global allocator.
+fails when the image does not fit `0x26000`–`0xED000`, or on the heap rule
+below. `cargo xtask build --no-scripts` builds the firmware without scripts.
 
-**No heap.** The firmware has no global allocator, and the crates in
-`crates/` are `no_std` without `alloc`, so nothing in the firmware can
-allocate: a dependency that needs a heap fails to link. Buffers are fixed
-size, in statics or in the embassy tasks.
+**A heap for scripts only.** The crates in `crates/` are `no_std` without
+`alloc`, and buffers are fixed size, in statics or in the embassy tasks.
+Only the scripts in Rhai Grain allocate, from a heap of 48 KiB of their own
+(`firmware/knixx-fw/src/heap.rs`, the `scripts` feature, on by default): a
+TLSF allocator, constant time and without a lock, that serves only in thread
+mode while the script code holds its grant, and panics with `alloc outside
+Rhai Grain` otherwise, so an allocation anywhere else shows at once. `sys`
+shows the heap in use and the most used since boot. Without the `scripts`
+feature the firmware links no allocator at all, and `cargo xtask build
+--no-scripts` fails if it does.
 
-**RAM.** The statics take about 35 KiB, the stack below them about 220 KiB:
+**RAM.** The statics take about 35 KiB, plus the heap with scripts, and the
+stack below them the rest, about 175 KiB with scripts and 220 KiB without:
 flip-link puts the stack at the bottom of RAM, so that an overflow faults
 instead of overwriting statics. The embassy tasks live in statics; the stack
 serves `main`, the executor and the interrupt handlers. `sys` shows the most
@@ -286,7 +293,7 @@ pulled while a terminal was open, would stall every writer, the bus with
 | `nus [on\|off]` | show the BLE console state, move the console to BLE NUS or back to USB |
 | `ota` | reboot into the bootloader for a BLE firmware update, see [Over BLE](#over-ble) |
 | `version` | the commit and build time of the firmware, `version <commit> built <date>`, also shown in the banner |
-| `sys` | the uptime, the stack high-water mark, the bytes queued and lost on the USB and BLE console outputs, and whether a USB terminal is open (DTR) |
+| `sys` | the uptime, the stack high-water mark, the heap in use and at most, the bytes queued and lost on the USB and BLE console outputs, and whether a USB terminal is open (DTR) |
 
 A panic resets the board; its message survives the reset in RAM and the
 next banner shows it as `last panic: ...`.
@@ -733,8 +740,8 @@ lint the two workspaces.
 
 CI runs the host tests, the golden log and firmware checks, both lints,
 `cargo fmt --check`, the `no_std` build of each crate, `cargo xtask build`
-with its flash, RAM and allocator checks, `cargo bloat` and the license
-check.
+with and without scripts, with its flash, RAM and heap checks, `cargo
+bloat` and the license check.
 
 ## License
 

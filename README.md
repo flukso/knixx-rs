@@ -137,8 +137,8 @@ tracked files differ from it) and the build time in UTC, and writes
 `build/knixx-dfu.zip`. It reports the flash and RAM the firmware takes, and
 fails when the image does not fit `0x26000`–`0xED000`, or on the heap rule
 below. `cargo xtask build --no-scripts` builds the firmware without scripts:
-about 376 KB of flash, against 673 KB with them, of which Rhai is some
-190 KB.
+about 376 KB of flash, against 634 KB with them, of which Rhai is some
+165 KB.
 
 **A heap for scripts only.** The crates in `crates/` are `no_std` without
 `alloc`, and buffers are fixed size, in statics or in the embassy tasks.
@@ -232,7 +232,7 @@ USB and the BLE controller can hang.
 
 The packets carry as much as the negotiated ATT MTU allows, 244 bytes with
 the bootloader's MTU of 247, which sent a 364 KB image in about a minute
-(the firmware with scripts is about 673 KB);
+(the firmware with scripts is about 634 KB);
 `bolt ota --chunk` sets another size. Phone apps that speak legacy DFU, such
 as nRF Connect or Bluefruit Connect, can also send `build/knixx-dfu.zip`.
 
@@ -501,15 +501,15 @@ A script defines four functions; `crates/knixx-script/template.rhai`, which
 | function | called |
 |---|---|
 | `on_info()` | at load: returns `#{ name, author, date, compiled, version, hash }` |
-| `on_init(scope)` | at load, after on_info: sets up the scope |
-| `on_telegram(scope, tg)` | for every telegram on the bus, the board's own too |
-| `on_time(scope, uptime)` | every second, with the uptime in seconds |
+| `on_init()` | at load, after on_info: sets up the state |
+| `on_telegram(tg)` | for every telegram on the bus, the board's own too |
+| `on_time(uptime)` | every second, with the uptime in seconds |
 
-`scope` is an object map that persists from call to call: the script's
-state, its settings included, as functions see only their parameters. A
-function of the script's own that changes it is called on it, as
-`scope.f()`, and changes `this`; given the scope as an argument, `f(scope)`
-changes a copy. `tg` is a map: `src` and `dest` (addresses as numbers),
+on_init, on_telegram and on_time are methods of the script's state, an
+object map that persists from call to call: they reach it as `this`, and
+what they set in it stays, settings included, as functions see only their
+parameters and `this`. A function of the script's own that uses the state
+is called as `this.f()` and reaches it as `this` too. `tg` is a map: `src` and `dest` (addresses as numbers),
 `group`, `apci` (`"write"`, `"read"`, `"response"` or `"other"`),
 `priority`, `hops`, `data` (a blob, from the APCI octet on) and `own`, true
 for a telegram this board sent, such as its occupancy.
@@ -537,7 +537,8 @@ from on_info.
 The board runs Rhai's bare engine with what scripts need, not Rhai's
 packages, so some of Rhai is not there: `for` loops (use `while` and
 `loop`; the compiler refuses `for`), modules, and constants at the top of a
-script, which functions cannot see. Integers are 32-bit, floats 32-bit.
+script, which functions cannot see, and closures. Integers are 32-bit,
+floats 32-bit.
 
 ### Limits
 
@@ -545,7 +546,7 @@ script, which functions cannot see. Integers are 32-bit, floats 32-bit.
 |---|---|
 | operations per call | 1,200, about 20 ms on the board; more is an error |
 | nested calls | 8 |
-| strings, arrays, maps | 256 characters, 64 elements, 32 entries, counted over a value and what it holds, the scope too |
+| strings, arrays, maps | 256 characters, 64 elements, 32 entries, counted over a value and what it holds, the state too |
 | telegrams sent | 4 per call and 16 per second per script; more return false |
 | script size | 16 KiB of bytecode |
 | scripts | 4 at a time |
@@ -883,7 +884,7 @@ cargo test
 
 runs the host tests, among them the VL53L7CX golden test, the littlefs
 tests on a NOR flash in RAM, and the scripts' tests: the template run step
-by step, the scope, the telegram, the sends and their limits, the errors
+by step, the state, the telegram, the sends and their limits, the errors
 returned rather than panics, the compiler's checks and the fault lines.
 `cargo xtask golden --check` checks the golden log against ST's C driver,
 and `cargo xtask genfw --check` the firmware files against its header.

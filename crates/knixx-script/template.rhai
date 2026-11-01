@@ -29,10 +29,10 @@
 //
 // Scripts have while and loop, but no for loops.
 //
-// The scope is the script's state: on_init, on_telegram and on_time get the
-// same one, and what they set in it stays. A function of the script's own
-// that changes it is called on it, as scope.f(), and changes this; given
-// the scope as an argument, f(scope), it would change a copy.
+// on_init, on_telegram and on_time are methods of the script's state, an
+// object map that persists from call to call: they reach it as this, and
+// what they set in it stays. A function of the script's own that uses the
+// state is called as this.f(), and reaches it as this too.
 
 fn on_info() {
     #{
@@ -52,27 +52,24 @@ fn on_info() {
 // stays on. The occupancy comes from this board's own ToF sensor, so it
 // arrives with tg.own set.
 
-// scope is an object map that persists from call to call.
-fn on_init(scope) {
-    scope.occupancy = ga("5/0/1");
-    scope.light = ga("0/0/2");
+fn on_init() {
+    this.occupancy = ga("5/0/1");
+    this.light = ga("0/0/2");
     // B's state, as the bus last showed it. A read only asks: knx_read
     // returns whether it was sent, and B answers later with a response,
     // which on_telegram takes. Until then, or if B does not answer reads,
     // B counts as off.
-    scope.on = false;
-    knx_read(scope.light);
+    this.on = false;
+    knx_read(this.light);
     // The seconds after the last occupied after which B goes off. Functions
-    // see only their parameters, so settings live in the scope too.
-    scope.hold = 10;
+    // see only their parameters and this, so settings live in the state.
+    this.hold = 10;
     // The uptime of the last on_time, and when B goes off; -1: not armed.
-    scope.now = 0;
-    scope.off_at = -1;
+    this.now = 0;
+    this.off_at = -1;
 }
 
-// Switches B to on, unless it is so already. A function that changes the
-// scope is called on it, scope.set_light(on), and reaches it as this: a
-// scope passed as an argument to it would be a copy.
+// Switches B to on, unless it is so already.
 fn set_light(on) {
     if this.on != on {
         knx_write(this.light, dpt1(on));
@@ -83,26 +80,26 @@ fn set_light(on) {
 // tg: #{ src, dest, group, apci ("write", "read", "response" or "other"),
 // priority, hops, data (a blob, from the APCI octet on), own (sent by this
 // board) }
-fn on_telegram(scope, tg) {
-    if tg.dest == scope.light && (tg.apci == "write" || tg.apci == "response") {
-        scope.on = dpt1_of(tg.data);
-    } else if tg.dest == scope.occupancy && tg.apci == "write" {
+fn on_telegram(tg) {
+    if tg.dest == this.light && (tg.apci == "write" || tg.apci == "response") {
+        this.on = dpt1_of(tg.data);
+    } else if tg.dest == this.occupancy && tg.apci == "write" {
         let occupied = dpt1_of(tg.data);
-        scope.set_light(occupied);
+        this.set_light(occupied);
         if occupied {
-            scope.off_at = scope.now + scope.hold;
+            this.off_at = this.now + this.hold;
         }
     }
 }
 
 // uptime: seconds since boot.
-fn on_time(scope, uptime) {
-    scope.now = uptime;
-    if scope.off_at >= 0 && uptime >= scope.off_at {
-        scope.off_at = -1;
-        if scope.on {
-            print(`B off ${scope.hold} s after the last occupied`);
-            scope.set_light(false);
+fn on_time(uptime) {
+    this.now = uptime;
+    if this.off_at >= 0 && uptime >= this.off_at {
+        this.off_at = -1;
+        if this.on {
+            print(`B off ${this.hold} s after the last occupied`);
+            this.set_light(false);
         }
     }
 }

@@ -71,9 +71,9 @@ fn tg(dest: &str, apci: Apci, data: &[u8]) -> Telegram {
 fn script(telegram: &str, time: &str) -> String {
     std::format!(
         r#"fn on_info() {{ #{{ name: "t", author: "a", date: "d", compiled: "{{{{compiled}}}}", version: "{{{{version}}}}", hash: "{{{{hash}}}}" }} }}
-fn on_init(scope) {{ scope.n = 0; }}
-fn on_telegram(scope, tg) {{ {telegram} }}
-fn on_time(scope, uptime) {{ {time} }}
+fn on_init() {{ this.n = 0; }}
+fn on_telegram(tg) {{ {telegram} }}
+fn on_time(uptime) {{ {time} }}
 "#
     )
 }
@@ -164,19 +164,19 @@ fn template_compiles_and_runs() {
 }
 
 #[test]
-fn scope_persists() {
-    let (rt, _, mut s) = load(&script("scope.n += 1;", "scope.n += uptime;"));
+fn state_persists() {
+    let (rt, _, mut s) = load(&script("this.n += 1;", "this.n += uptime;"));
     s.init(&rt).unwrap();
     for _ in 0..3 {
         s.telegram(&rt, &tg("1/2/3", Apci::GroupValueWrite, &[1]), false)
             .unwrap();
     }
     s.time(&rt, 10).unwrap();
-    let n = s.scope().clone().flatten().try_cast::<Map>().unwrap()["n"].as_int();
+    let n = s.state().clone().try_cast::<Map>().unwrap()["n"].as_int();
     assert_eq!(n, Ok(13));
     // on_init starts over.
     s.init(&rt).unwrap();
-    let n = s.scope().clone().flatten().try_cast::<Map>().unwrap()["n"].as_int();
+    let n = s.state().clone().try_cast::<Map>().unwrap()["n"].as_int();
     assert_eq!(n, Ok(0));
 }
 
@@ -205,7 +205,7 @@ fn sends() {
         knx_read(ga("1/0/3"));
         knx_response(ga("1/0/4"), blob([0, 128]));
         // Over the limit of four.
-        scope.fifth = knx_write(ga("1/0/5"), dpt1(true));
+        this.fifth = knx_write(ga("1/0/5"), dpt1(true));
         "#,
         "",
     ));
@@ -247,7 +247,7 @@ fn errors_are_returned() {
         ("let x = 1 / 0;", "Division by zero"),
         ("nope();", "Function not found"),
         ("let a = [1]; a[5];", "out of bounds"),
-        ("loop { scope.n += 1; }", "Too many operations"),
+        ("loop { this.n += 1; }", "Too many operations"),
         (r#"ga("40/0/0");"#, "ga(\"40/0/0\")"),
         (
             "knx_write(ga(\"1/0/1\"), blob([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]));",
@@ -271,14 +271,15 @@ fn errors_are_returned() {
 
 #[test]
 fn compile_errors() {
-    let missing = TEMPLATE.replace("fn on_time(scope, uptime)", "fn on_tick(scope, uptime)");
-    let arity = TEMPLATE.replace("fn on_init(scope)", "fn on_init()");
-    let for_loop = script("for i in 0..3 { scope.n += i; }", "");
+    let missing = TEMPLATE.replace("fn on_time(uptime)", "fn on_tick(uptime)");
+    // The interface of 0.2, with the state as a parameter.
+    let arity = TEMPLATE.replace("fn on_init()", "fn on_init(scope)");
+    let for_loop = script("for i in 0..3 { this.n += i; }", "");
     let syntax = script("let x = ;", "");
     let placeholder = TEMPLATE.replace("\"{{hash}}\"", "\"mine\"");
     for (source, want) in [
-        (missing.as_str(), "fn on_time() with 2 parameter(s)"),
-        (arity.as_str(), "fn on_init() with 1 parameter(s)"),
+        (missing.as_str(), "fn on_time() with 1 parameter(s)"),
+        (arity.as_str(), "fn on_init() with 0 parameter(s)"),
         (for_loop.as_str(), "for"),
         (syntax.as_str(), "line 3"),
         (
@@ -333,8 +334,8 @@ fn send_rate() {
 fn fault_lines() {
     // The division on line 6, in half, which on_time calls on line 4.
     let src = script("", "half(uptime);").replace(
-        "fn on_time(scope, uptime) { half(uptime); }",
-        "fn on_time(scope, uptime) { half(uptime); }\nfn half(x) {\n    x / 0\n}",
+        "fn on_time(uptime) { half(uptime); }",
+        "fn on_time(uptime) { half(uptime); }\nfn half(x) {\n    x / 0\n}",
     );
     let build = compile(&src, &META).unwrap();
     let (rt, _, mut s) = load(&src);
@@ -342,4 +343,18 @@ fn fault_lines() {
     let e = s.time(&rt, 1).unwrap_err();
     assert_eq!(e.faults.len(), 2, "{e:?}");
     assert_eq!(lines(&build, &e.faults), [Some(6), Some(4)]);
+}
+
+#[test]
+fn helpers_reach_this() {
+    let src = script("this.add(tg.data[0]);", "").replace(
+        "fn on_time(uptime) {  }",
+        "fn on_time(uptime) {  }\nfn add(x) { this.n += x; }",
+    );
+    let (rt, _, mut s) = load(&src);
+    s.init(&rt).unwrap();
+    s.telegram(&rt, &tg("1/2/3", Apci::GroupValueWrite, &[7]), false)
+        .unwrap();
+    let n = s.state().clone().try_cast::<Map>().unwrap()["n"].as_int();
+    assert_eq!(n, Ok(7));
 }

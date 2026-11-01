@@ -46,7 +46,7 @@ enum Callback {
 
 /// The heap in use after a call above which the script that made the call
 /// is stopped, freeing what it holds: the limits bound a call, but not what
-/// a script keeps in its scope from call to call. The rest of the heap is
+/// a script keeps in its state from call to call. The rest of the heap is
 /// room for one call, which within its operations allocates less.
 const HEAP_LIMIT: usize = crate::heap::SIZE * 5 / 8;
 

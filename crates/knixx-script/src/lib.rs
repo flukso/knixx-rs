@@ -1,20 +1,20 @@
 //! Scripts in Rhai Grain: compiled to bytecode on the host and run on the
 //! board, where each one is called on every telegram on the bus and every
-//! second, keeps its state in a scope of its own, and sends telegrams.
+//! second, keeps its state, and sends telegrams.
 //!
-//! A script defines four functions:
+//! A script defines four functions; the last three are methods of its
+//! state, an object map that persists from call to call, which they reach
+//! as `this`:
 //!
 //! - `on_info()` returns a map with its `name`, `author`, `date`, and the
 //!   `compiled`, `version` and `hash` the compiler fills in;
-//! - `on_init(scope)` sets up the scope, an object map that persists from
-//!   call to call;
-//! - `on_telegram(scope, tg)` gets each telegram on the bus, the board's own
-//!   too, as a map;
-//! - `on_time(scope, uptime)` is called every second with the uptime in
-//!   seconds.
+//! - `on_init()` sets up the state, empty before;
+//! - `on_telegram(tg)` gets each telegram on the bus, the board's own too,
+//!   as a map;
+//! - `on_time(uptime)` is called every second with the uptime in seconds.
 //!
 //! [`Runtime`] holds the engine, with its limits and the functions scripts
-//! can call; [`Script`] is a loaded program with its scope. With the
+//! can call; [`Script`] is a loaded program with its state. With the
 //! `compiler` feature, [`compile`] turns a script into bytecode on the host
 //! and checks it.
 //!
@@ -68,7 +68,7 @@ pub const MAX_RATE: u32 = 16;
 
 /// The functions every script defines, with their number of parameters.
 pub const FUNCTIONS: [(&str, usize); 4] =
-    [("on_info", 0), ("on_init", 1), ("on_telegram", 2), ("on_time", 2)];
+    [("on_info", 0), ("on_init", 0), ("on_telegram", 1), ("on_time", 1)];
 
 /// The keys of the map on_info returns.
 pub const INFO_KEYS: [&str; 6] = ["name", "author", "date", "compiled", "version", "hash"];
@@ -324,12 +324,11 @@ impl fmt::Display for Error {
     }
 }
 
-/// A loaded script: its program and its scope.
+/// A loaded script: its program and its state.
 pub struct Script {
     program: Program<'static>,
-    /// The object map that on_init sets up, shared so that the calls change
-    /// it in place.
-    scope: Dynamic,
+    /// The object map that on_init sets up and the calls get as this.
+    state: Dynamic,
     /// Rhai's scope of the calls; the scripts keep nothing in it.
     rhai_scope: Scope<'static>,
     /// The second of the uptime of the last call, and the sends since.
@@ -344,7 +343,7 @@ impl Script {
         let program = Program::read(bytes)?.into_owned();
         Ok(Script {
             program,
-            scope: Dynamic::from_map(Map::new()).into_shared(),
+            state: Dynamic::from_map(Map::new()),
             rhai_scope: Scope::new(),
             second: 0,
             sent: 0,
@@ -355,10 +354,12 @@ impl Script {
     /// of all its calls against the limit. eval_ast(false) skips the top
     /// level, which declares nothing; rewind_scope stays on, as Rhai Grain
     /// 1.27 panics on a script error with both off.
+    /// With this, the call is a method of the state.
     fn call(
         &mut self,
         rt: &Runtime,
         name: &'static str,
+        this: bool,
         args: impl rhai::FuncArgs,
     ) -> Result<Dynamic, Error> {
         let now = rt.now.get();
@@ -372,7 +373,10 @@ impl Script {
             s.allowed = MAX_SENDS.min(MAX_RATE.saturating_sub(self.sent));
         }
         let mut vm = Vm::new(&rt.engine);
-        let opts = CallFnOptions::new().eval_ast(false);
+        let mut opts = CallFnOptions::new().eval_ast(false);
+        if this {
+            opts = opts.bind_this_ptr(&mut self.state);
+        }
         let r = vm
             .call_fn_with_options::<Dynamic>(opts, &mut self.rhai_scope, &self.program, name, args)
             .map_err(|e| Error {
@@ -386,7 +390,7 @@ impl Script {
 
     /// Calls on_info.
     pub fn info(&mut self, rt: &Runtime) -> Result<Info, Error> {
-        let v = self.call(rt, "on_info", ())?;
+        let v = self.call(rt, "on_info", false, ())?;
         Info::from(v).map_err(|text| Error {
             call: "on_info",
             text,
@@ -394,29 +398,26 @@ impl Script {
         })
     }
 
-    /// Calls on_init with a new, empty scope.
+    /// Calls on_init on a new, empty state.
     pub fn init(&mut self, rt: &Runtime) -> Result<(), Error> {
-        self.scope = Dynamic::from_map(Map::new()).into_shared();
-        let scope = self.scope.clone();
-        self.call(rt, "on_init", (scope,)).map(|_| ())
+        self.state = Dynamic::from_map(Map::new());
+        self.call(rt, "on_init", true, ()).map(|_| ())
     }
 
     /// Calls on_telegram with tg, own telling the board's own.
     pub fn telegram(&mut self, rt: &Runtime, tg: &Telegram, own: bool) -> Result<(), Error> {
-        let scope = self.scope.clone();
-        self.call(rt, "on_telegram", (scope, telegram_map(tg, own)))
+        self.call(rt, "on_telegram", true, (telegram_map(tg, own),))
             .map(|_| ())
     }
 
     /// Calls on_time with the uptime in seconds.
     pub fn time(&mut self, rt: &Runtime, uptime: u32) -> Result<(), Error> {
-        let scope = self.scope.clone();
         let up = uptime.min(INT::MAX as u32) as INT;
-        self.call(rt, "on_time", (scope, up)).map(|_| ())
+        self.call(rt, "on_time", true, (up,)).map(|_| ())
     }
 
-    /// The scope, for a look at it.
-    pub fn scope(&self) -> &Dynamic {
-        &self.scope
+    /// The state, for a look at it.
+    pub fn state(&self) -> &Dynamic {
+        &self.state
     }
 }

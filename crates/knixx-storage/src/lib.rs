@@ -12,6 +12,11 @@
 //! Unlike the Go firmware, a flash that holds a littlefs superblock but does
 //! not mount is never formatted: the configuration on it may still be
 //! recoverable, and a mistake in the geometry would otherwise wipe it.
+//!
+//! Besides the configuration, the littlefs holds other files, such as the
+//! scripts: [`read`], [`write_atomic`], [`remove`], [`mkdir`], [`stat`] and
+//! [`list`] work on whole files by path. Each mounts the littlefs and
+//! unmounts it again, and none formats it.
 
 #![no_std]
 
@@ -108,6 +113,102 @@ impl fmt::Display for Error {
             Error::Mount(e, true) => write!(f, "littlefs mount: {e}; the flash is not formatted"),
             Error::File(e) => write!(f, "{CONFIG_NAME}: {e}"),
             Error::TooLarge => write!(f, "{CONFIG_NAME}: larger than {} bytes", config::MAX_FILE),
+        }
+    }
+}
+
+/// The longest path, in bytes.
+pub const MAX_PATH: usize = 63;
+
+/// The suffix of the file that write_atomic writes before it renames it.
+const TMP_SUFFIX: &[u8] = b".tmp";
+
+/// A path with its C terminator, and room for TMP_SUFFIX.
+struct CPath {
+    buf: [u8; MAX_PATH + TMP_SUFFIX.len() + 1],
+    len: usize,
+}
+
+impl CPath {
+    /// Checks path: not empty, at most MAX_PATH bytes, without NUL.
+    fn new(path: &str) -> Result<CPath, FsError> {
+        let b = path.as_bytes();
+        if b.is_empty() || b.len() > MAX_PATH || b.contains(&0) {
+            return Err(FsError::Path);
+        }
+        let mut p = CPath {
+            buf: [0; MAX_PATH + TMP_SUFFIX.len() + 1],
+            len: b.len(),
+        };
+        p.buf[..b.len()].copy_from_slice(b);
+        Ok(p)
+    }
+
+    /// The path with its terminator.
+    fn c(&self) -> &[u8] {
+        &self.buf[..self.len + 1]
+    }
+
+    /// The path with TMP_SUFFIX, and its terminator.
+    fn tmp(&self) -> CPath {
+        let mut t = CPath {
+            buf: self.buf,
+            len: self.len + TMP_SUFFIX.len(),
+        };
+        t.buf[self.len..t.len].copy_from_slice(TMP_SUFFIX);
+        t.buf[t.len] = 0;
+        t
+    }
+}
+
+/// Why a file operation failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FsError {
+    /// The littlefs does not mount.
+    Mount(Code),
+    /// littlefs failed, such as LFS_ERR_NOENT for a missing file.
+    Fs(Code),
+    /// The path is empty, longer than MAX_PATH or holds a NUL.
+    Path,
+    /// The file does not fit the buffer.
+    TooLarge,
+}
+
+impl FsError {
+    /// Reports whether the file or directory does not exist.
+    pub fn not_found(&self) -> bool {
+        *self == FsError::Fs(Code(ll::lfs_error_LFS_ERR_NOENT))
+    }
+}
+
+impl fmt::Display for FsError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            FsError::Mount(e) => write!(f, "littlefs mount: {e}"),
+            FsError::Fs(e) => e.fmt(f),
+            FsError::Path => write!(f, "bad path (1 to {MAX_PATH} bytes)"),
+            FsError::TooLarge => f.write_str("file too large"),
+        }
+    }
+}
+
+/// An entry of a directory, or of a path, as stat and list report them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Entry<'a> {
+    pub name: &'a str,
+    pub size: u32,
+    pub dir: bool,
+}
+
+impl<'a> Entry<'a> {
+    fn of(info: &'a ll::lfs_info) -> Entry<'a> {
+        // Safety: c_char and u8 have the same layout.
+        let name: &[u8; 256] = unsafe { &*(&info.name as *const _ as *const [u8; 256]) };
+        let n = name.iter().position(|&b| b == 0).unwrap_or(name.len());
+        Entry {
+            name: core::str::from_utf8(&name[..n]).unwrap_or("?"),
+            size: info.size,
+            dir: u32::from(info.type_) == ll::lfs_type_LFS_TYPE_DIR,
         }
     }
 }
@@ -310,6 +411,29 @@ impl<'d, D: BlockDevice> Lfs<'d, D> {
     }
 }
 
+impl<'d, D: BlockDevice> Lfs<'d, D> {
+    /// Mounts the littlefs on dev, without formatting it, and runs f on it.
+    fn with_mounted<R>(
+        dev: &'d mut D,
+        f: impl FnOnce(&mut Self) -> Result<R, FsError>,
+    ) -> Result<R, FsError> {
+        let mut fs = Lfs::new(dev);
+        fs.setup();
+        fs.mount().map_err(FsError::Mount)?;
+        f(&mut fs)
+    }
+
+    fn stat_info(&mut self, path: &[u8]) -> Result<Option<ll::lfs_info>, Code> {
+        let mut info = ll::lfs_info::default();
+        // Safety: mounted; path is a C string.
+        match check(unsafe { ll::lfs_stat(&mut self.lfs, path.as_ptr() as _, &mut info) }) {
+            Ok(_) => Ok(Some(info)),
+            Err(Code(ll::lfs_error_LFS_ERR_NOENT)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+}
+
 impl<D: BlockDevice> Drop for Lfs<'_, D> {
     fn drop(&mut self) {
         if self.mounted {
@@ -365,6 +489,112 @@ pub fn format<D: BlockDevice>(dev: &mut D) -> Result<(), Error> {
     let mut fs = Lfs::new(dev);
     fs.setup();
     fs.format().map_err(Error::Format)
+}
+
+/// Reads the file at path into buf and returns its length; a file larger
+/// than buf is an error, so is a directory.
+pub fn read<D: BlockDevice>(dev: &mut D, path: &str, buf: &mut [u8]) -> Result<usize, FsError> {
+    let p = CPath::new(path)?;
+    Lfs::with_mounted(dev, |fs| {
+        let info = fs
+            .stat_info(p.c())
+            .map_err(FsError::Fs)?
+            .ok_or(FsError::Fs(Code(ll::lfs_error_LFS_ERR_NOENT)))?;
+        if u32::from(info.type_) == ll::lfs_type_LFS_TYPE_DIR {
+            return Err(FsError::Fs(Code(ll::lfs_error_LFS_ERR_ISDIR)));
+        }
+        if info.size as usize > buf.len() {
+            return Err(FsError::TooLarge);
+        }
+        fs.read_file(p.c(), &mut buf[..info.size as usize])
+            .map_err(FsError::Fs)
+    })
+}
+
+/// Writes data as the file at path, replacing it as a whole: the data goes
+/// to path.tmp first, which is then renamed, so that a reset halfway leaves
+/// the old file, not part of the new one.
+pub fn write_atomic<D: BlockDevice>(dev: &mut D, path: &str, data: &[u8]) -> Result<(), FsError> {
+    let p = CPath::new(path)?;
+    let tmp = p.tmp();
+    Lfs::with_mounted(dev, |fs| {
+        fs.write_file(tmp.c(), data).map_err(FsError::Fs)?;
+        // Safety: mounted; both paths are C strings.
+        check(unsafe { ll::lfs_rename(&mut fs.lfs, tmp.c().as_ptr() as _, p.c().as_ptr() as _) })
+            .map_err(FsError::Fs)?;
+        Ok(())
+    })
+}
+
+/// Removes the file or the empty directory at path and reports whether it
+/// was there.
+pub fn remove<D: BlockDevice>(dev: &mut D, path: &str) -> Result<bool, FsError> {
+    let p = CPath::new(path)?;
+    Lfs::with_mounted(dev, |fs| {
+        // Safety: mounted; path is a C string.
+        match check(unsafe { ll::lfs_remove(&mut fs.lfs, p.c().as_ptr() as _) }) {
+            Ok(_) => Ok(true),
+            Err(Code(ll::lfs_error_LFS_ERR_NOENT)) => Ok(false),
+            Err(e) => Err(FsError::Fs(e)),
+        }
+    })
+}
+
+/// Makes the directory at path, unless it is there already.
+pub fn mkdir<D: BlockDevice>(dev: &mut D, path: &str) -> Result<(), FsError> {
+    let p = CPath::new(path)?;
+    Lfs::with_mounted(dev, |fs| {
+        // Safety: mounted; path is a C string.
+        match check(unsafe { ll::lfs_mkdir(&mut fs.lfs, p.c().as_ptr() as _) }) {
+            Ok(_) | Err(Code(ll::lfs_error_LFS_ERR_EXIST)) => Ok(()),
+            Err(e) => Err(FsError::Fs(e)),
+        }
+    })
+}
+
+/// Runs f on the entry of path, or None when there is none.
+pub fn stat<D: BlockDevice, R>(
+    dev: &mut D,
+    path: &str,
+    f: impl FnOnce(Option<Entry<'_>>) -> R,
+) -> Result<R, FsError> {
+    let p = CPath::new(path)?;
+    Lfs::with_mounted(dev, |fs| {
+        let info = fs.stat_info(p.c()).map_err(FsError::Fs)?;
+        Ok(f(info.as_ref().map(Entry::of)))
+    })
+}
+
+/// Runs f on each entry of the directory at path, in littlefs' order,
+/// without "." and "..".
+pub fn list<D: BlockDevice>(dev: &mut D, path: &str, mut f: impl FnMut(Entry<'_>)) -> Result<(), FsError> {
+    let p = CPath::new(path)?;
+    Lfs::with_mounted(dev, |fs| {
+        let mut dir = ll::lfs_dir_t::default();
+        // Safety: mounted; path is a C string; dir stays in place until
+        // closed.
+        check(unsafe { ll::lfs_dir_open(&mut fs.lfs, &mut dir, p.c().as_ptr() as _) })
+            .map_err(FsError::Fs)?;
+        let mut info = ll::lfs_info::default();
+        let r = loop {
+            // Safety: the directory is open.
+            match check(unsafe { ll::lfs_dir_read(&mut fs.lfs, &mut dir, &mut info) }) {
+                Ok(0) => break Ok(()),
+                Ok(_) => {
+                    let e = Entry::of(&info);
+                    if e.name != "." && e.name != ".." {
+                        f(e);
+                    }
+                }
+                Err(e) => break Err(FsError::Fs(e)),
+            }
+        };
+        // Safety: the directory is open.
+        let closed = check(unsafe { ll::lfs_dir_close(&mut fs.lfs, &mut dir) });
+        r?;
+        closed.map_err(FsError::Fs)?;
+        Ok(())
+    })
 }
 
 #[cfg(test)]

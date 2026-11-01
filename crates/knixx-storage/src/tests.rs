@@ -123,3 +123,91 @@ fn corrupt_littlefs_is_kept() {
     assert_eq!(log, "");
     assert!(flash.data == before, "the flash changed");
 }
+
+/// The names, sizes and kinds of the entries of dir, sorted.
+fn ls(flash: &mut RamFlash, dir: &str) -> Vec<(String, u32, bool)> {
+    let mut v = Vec::new();
+    list(flash, dir, |e| v.push((e.name.to_string(), e.size, e.dir))).unwrap();
+    v.sort();
+    v
+}
+
+/// A flash with the default configuration on it.
+fn formatted() -> RamFlash {
+    let mut flash = RamFlash::blank();
+    load_str(&mut flash).0.unwrap();
+    flash
+}
+
+#[test]
+fn files_in_a_directory() {
+    let mut flash = formatted();
+    mkdir(&mut flash, "/scripts").unwrap();
+    mkdir(&mut flash, "/scripts").unwrap(); // there already: fine
+    let big: Vec<u8> = (0..10_000u32).map(|i| i as u8).collect();
+    write_atomic(&mut flash, "/scripts/a.rhgn", b"first").unwrap();
+    write_atomic(&mut flash, "/scripts/b.rhgn", &big).unwrap();
+    // A shorter file replaces the old one whole.
+    write_atomic(&mut flash, "/scripts/a.rhgn", b"2nd").unwrap();
+
+    let mut buf = [0u8; 16];
+    assert_eq!(read(&mut flash, "/scripts/a.rhgn", &mut buf), Ok(3));
+    assert_eq!(&buf[..3], b"2nd");
+    let mut buf = vec![0u8; 10_000];
+    assert_eq!(read(&mut flash, "/scripts/b.rhgn", &mut buf), Ok(10_000));
+    assert!(buf == big, "b.rhgn read back differs");
+
+    // No .tmp left behind; the directory shows in the root.
+    assert_eq!(
+        ls(&mut flash, "/scripts"),
+        [
+            ("a.rhgn".to_string(), 3, false),
+            ("b.rhgn".to_string(), 10_000, false)
+        ]
+    );
+    assert_eq!(
+        ls(&mut flash, "/"),
+        [
+            ("knixx.ini".to_string(), config::DEFAULT.len() as u32, false),
+            ("scripts".to_string(), 0, true)
+        ]
+    );
+    assert_eq!(
+        stat(&mut flash, "/scripts/b.rhgn", |e| e.map(|e| (e.size, e.dir))),
+        Ok(Some((10_000, false)))
+    );
+    assert_eq!(stat(&mut flash, "/scripts/c.rhgn", |e| e.is_some()), Ok(false));
+
+    assert_eq!(remove(&mut flash, "/scripts/a.rhgn"), Ok(true));
+    assert_eq!(remove(&mut flash, "/scripts/a.rhgn"), Ok(false));
+    assert_eq!(ls(&mut flash, "/scripts").len(), 1);
+
+    // The configuration is untouched, and it survives a remount.
+    assert_eq!(load_str(&mut flash).0.unwrap().as_bytes(), config::DEFAULT);
+}
+
+#[test]
+fn file_errors() {
+    let mut flash = formatted();
+    let mut buf = [0u8; 4];
+    let e = read(&mut flash, "/nope", &mut buf).unwrap_err();
+    assert!(e.not_found(), "{e:?}");
+    assert_eq!(e.to_string(), "no such file or directory");
+    // Larger than the buffer.
+    write_atomic(&mut flash, "/five", b"12345").unwrap();
+    assert_eq!(read(&mut flash, "/five", &mut buf), Err(FsError::TooLarge));
+    // A directory is not a file.
+    mkdir(&mut flash, "/d").unwrap();
+    assert!(matches!(read(&mut flash, "/d", &mut buf), Err(FsError::Fs(_))));
+    // Bad paths, refused before littlefs sees them.
+    let long = "/".repeat(MAX_PATH + 1);
+    for p in ["", "/a\0b", long.as_str()] {
+        assert_eq!(write_atomic(&mut flash, p, b"x"), Err(FsError::Path), "{p:?}");
+    }
+    // A file in a missing directory.
+    assert!(write_atomic(&mut flash, "/none/x", b"x").unwrap_err().not_found());
+    // A blank flash is not mounted, and not formatted either.
+    let mut blank = RamFlash::blank();
+    assert!(matches!(mkdir(&mut blank, "/scripts"), Err(FsError::Mount(_))));
+    assert!(!has_superblock(&mut blank));
+}

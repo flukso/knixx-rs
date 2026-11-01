@@ -567,6 +567,13 @@ only compares them.
 firmware made. The littlefs2 crate is not used: it pins on-disk version 2.0,
 and littlefs does not mount a filesystem of a later minor version.
 
+Besides `/knixx.ini`, the littlefs holds other files, such as the scripts
+in `/scripts`: the crate reads, writes, removes and lists whole files by
+path, and makes directories. A write goes to `<path>.tmp` first and is then
+renamed, so that a reset halfway leaves the old file, not part of the new
+one. None of these formats the flash: only the boot does, and only a blank
+one.
+
 At boot the firmware mounts the littlefs, writes the default configuration
 when there is no file, and shows what it did under the banner. A blank flash
 is formatted, but a flash that holds a littlefs that does not mount is left

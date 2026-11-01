@@ -1,0 +1,99 @@
+name: release
+
+# A pushed tag v* gets a GitHub release with the firmware and bolt attached.
+# Run it by hand with a tag to add the files to an existing release.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build and release, e.g. v0.3.1"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: Packages
+        run: sudo apt-get update && sudo apt-get install -y clang libclang-dev pkg-config
+      - name: Toolchain
+        run: rustup show
+      - name: flip-link
+        run: cargo install flip-link --locked
+      - name: Build
+        # build/knixx.{elf,uf2,hex} and build/knixx-dfu.zip
+        run: cargo xtask build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: |
+            build/knixx.elf
+            build/knixx.uf2
+            build/knixx.hex
+            build/knixx-dfu.zip
+
+  bolt:
+    strategy:
+      matrix:
+        include:
+          # Ubuntu 22.04's glibc 2.35, so the Linux builds also run on
+          # Debian 12 and Raspberry Pi OS.
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: Packages
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - name: Toolchain
+        run: rustup show
+      - name: Build
+        run: cargo build --release --locked -p bolt
+      - name: Package
+        run: |
+          d=bolt-$TAG-${{ matrix.target }}
+          mkdir $d
+          cp target/release/bolt LICENSE $d/
+          tar czf $d.tar.gz $d
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bolt-${{ matrix.target }}
+          path: bolt-*.tar.gz
+
+  release:
+    needs: [firmware, bolt]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG"
+          ls -l dist
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* --verify-tag --notes-from-tag
+          fi

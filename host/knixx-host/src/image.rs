@@ -296,8 +296,9 @@ mod tests {
         };
         let ram = Ram::from_elf(&data).unwrap();
         assert!(!ram.allocator, "the firmware links an allocator");
-        // flip-link: the stack from the start of RAM up to the statics.
-        assert_eq!(ram.stack.0, 0x2000_0008);
+        // flip-link: the stack from the start of RAM, after the panic
+        // record, up to the statics.
+        assert_eq!(ram.stack.0, 0x2000_0108);
         assert_eq!(ram.stack.1, ram.statics.0);
         assert_eq!(ram.statics.1, 0x2004_0000);
     }

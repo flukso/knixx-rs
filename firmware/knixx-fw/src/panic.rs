@@ -1,5 +1,6 @@
-//! A panic records its message in RAM that the startup code leaves alone,
-//! and resets the chip; the next boot shows the record in its banner.
+//! A panic records its message in RAM that neither the startup code nor
+//! the UF2 bootloader touches (PANIC in memory.x), and resets the chip; the
+//! next boot shows the record in its banner.
 
 use core::fmt::Write;
 use core::mem::MaybeUninit;
@@ -15,7 +16,7 @@ struct Record {
     msg: [u8; 200],
 }
 
-#[unsafe(link_section = ".uninit.PANIC")]
+#[unsafe(link_section = ".panic")]
 static mut RECORD: MaybeUninit<Record> = MaybeUninit::uninit();
 
 /// Writes into a fixed buffer, cutting off what does not fit.

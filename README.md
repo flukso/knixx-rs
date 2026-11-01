@@ -720,6 +720,7 @@ folds onto the parabola y = 2x² − 1.
 | `crates/knixx-sensors` | async SHT2x and VCNL4040 drivers on embedded-hal |
 | `crates/knixx-vl53l7cx` | async VL53L7CX driver, a port of ST's ULD 2.0.1 with the motion plugins; the vendored ULD and the harness that records its golden log |
 | `crates/knixx-storage` | the configuration file on littlefs |
+| `crates/knixx-script` | scripts in Rhai Grain: the engine with its limits and the functions scripts call, loading and calling them, the compiler with its checks, and `template.rhai` |
 | `host/knixx-host` | host library: firmware images (ELF to UF2, Intel HEX, binary), UF2 files, the bootloader's drive, the USB serial port, flashing, BLE scanning, legacy DFU packages and updates |
 | `host/bolt` | host tool: `bolt convert`, `genpkg`, `ota`, `term`, `uf2`, `scan` |
 | `host/knixx-shell` | KNX shell on the host over an FTDI-attached NCN5121 |

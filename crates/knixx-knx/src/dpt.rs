@@ -78,6 +78,45 @@ impl fmt::Display for Dpt1018 {
     }
 }
 
+/// The DPT 9 bounds, in hundredths.
+const MIN_F16: i32 = -67_108_864;
+const MAX_F16: i32 = 67_076_096;
+
+/// Packs the DPT 9 (2-octet float) value h hundredths as a telegram's data,
+/// the APCI octet and the two value octets: the value is m·2^e hundredths
+/// with an 11-bit signed mantissa m, so m loses its low bits as e grows. A
+/// value out of range is clamped.
+pub fn f16_pack(h: i32) -> [u8; 3] {
+    let mut m = h.clamp(MIN_F16, MAX_F16);
+    let mut e = 0u8;
+    while !(-2048..=2047).contains(&m) {
+        m /= 2;
+        e += 1;
+    }
+    let mut data = [0, e << 3, 0];
+    if m < 0 {
+        m += 2048;
+        data[1] |= 0x80;
+    }
+    data[1] |= (m >> 8) as u8 & 0x07;
+    data[2] = m as u8;
+    data
+}
+
+/// Unpacks the DPT 9 value in data, the APCI octet and two value octets, in
+/// hundredths: the value is 0.01·m·2^e, so this is exact. None for another
+/// length.
+pub fn f16_unpack(data: &[u8]) -> Option<i32> {
+    let [_, hi, lo] = *data else {
+        return None;
+    };
+    let mut m = ((hi & 0x07) as i32) << 8 | lo as i32;
+    if hi & 0x80 != 0 {
+        m -= 2048;
+    }
+    Some(m << (hi >> 3 & 0x0f))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

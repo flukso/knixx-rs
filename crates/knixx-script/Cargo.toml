@@ -1,0 +1,29 @@
+[package]
+name = "knixx-script"
+version = "0.1.0"
+description = "Scripts in Rhai Grain: the engine and the functions the firmware gives them, loading and calling them, and their compiler"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+knixx-knx = { path = "../knixx-knx" }
+# One feature list for the board and the host: a program carries the
+# integer width and these restrictions in its ABI fingerprint, and the
+# board reads only programs written with the same. no_std or std, the AST
+# and the source positions, which the ABI does not cover, come from this
+# crate's features.
+rhai = { version = "=1.27.0", default-features = false, features = [
+    "grain",
+    "only_i32",
+    "f32_float",
+    "no_module",
+    "no_custom_syntax",
+    "no_time",
+] }
+
+[features]
+default = ["compiler"]
+# The board: bytecode only, without the parser, the AST and positions.
+no_std = ["rhai/no_std", "rhai/no_ast", "rhai/no_position"]
+# The host: compiles scripts to bytecode and checks them.
+compiler = ["rhai/std"]

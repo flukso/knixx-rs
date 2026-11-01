@@ -40,7 +40,7 @@ jobs:
           CFLAGS_thumbv7em_none_eabihf: -ffreestanding -mcpu=cortex-m4
         run: |
           export CPATH="$PWD/firmware/c-include"
-          for c in crates/*; do (cd $c && cargo build --target thumbv7em-none-eabihf) || exit 1; done
+          for c in crates/*; do (cd $c && cargo build --target thumbv7em-none-eabihf $(test $c = crates/knixx-script && echo --no-default-features --features no_std)) || exit 1; done
       - name: Firmware build and size
         run: |
           cargo xtask build --no-scripts

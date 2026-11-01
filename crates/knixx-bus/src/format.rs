@@ -123,23 +123,10 @@ impl fmt::Write for Line {
     }
 }
 
-/// Decodes the DPT 9 value in data, the APCI octet and two value octets, in
-/// hundredths: the value is 0.01·m·2^e, so this is exact. None for another
-/// length.
+/// Decodes the DPT 9 value in data in hundredths, see dpt::f16_unpack.
 pub(crate) fn f16(data: &[u8]) -> Option<i32> {
-    let [_, hi, lo] = *data else {
-        return None;
-    };
-    let mut m = ((hi & 0x07) as i32) << 8 | lo as i32;
-    if hi & 0x80 != 0 {
-        m -= 2048;
-    }
-    Some(m << (hi >> 3 & 0x0f))
+    knixx_knx::dpt::f16_unpack(data)
 }
-
-/// The DPT 9 bounds, in hundredths.
-const MIN_F16_PACK: i32 = -67_108_864;
-const MAX_F16_PACK: i32 = 67_076_096;
 
 /// The packed values sent fit: DPT 1 and DPT 9.
 pub(crate) const MAX_DATA: usize = 3;
@@ -171,22 +158,9 @@ pub(crate) fn bool_write(group: u16, on: bool) -> Write {
 /// octet: the value is m·2^e hundredths with an 11-bit signed mantissa m, so
 /// m loses its low bits as e grows. A value out of range is clamped.
 pub(crate) fn f16_write(group: u16, h: i32) -> Write {
-    let mut m = h.clamp(MIN_F16_PACK, MAX_F16_PACK);
-    let mut e = 0u8;
-    while !(-2048..=2047).contains(&m) {
-        m /= 2;
-        e += 1;
-    }
-    let mut w = Write {
+    Write {
         group,
-        data: [0, e << 3, 0],
+        data: knixx_knx::dpt::f16_pack(h),
         n: 3,
-    };
-    if m < 0 {
-        m += 2048;
-        w.data[1] |= 0x80;
     }
-    w.data[1] |= (m >> 8) as u8 & 0x07;
-    w.data[2] = m as u8;
-    w
 }

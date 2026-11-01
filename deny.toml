@@ -13,6 +13,11 @@ allow = [
     "MPL-2.0",
 ]
 confidence-threshold = 0.9
+# CC0-1.0 is a public-domain dedication, fine next to MIT. Allowed per crate
+# rather than globally: tiny-keccak comes in via rhai -> ahash -> const-random.
+exceptions = [
+    { crate = "tiny-keccak", allow = ["CC0-1.0"] },
+]
 
 [bans]
 multiple-versions = "allow"

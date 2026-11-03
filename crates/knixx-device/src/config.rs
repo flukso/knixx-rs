@@ -6,7 +6,7 @@ use core::fmt::{self, Write};
 use knixx_knx::address::{GroupAddressError, IndividualAddressError};
 use knixx_knx::{GroupAddress, IndividualAddress};
 
-use crate::thunder::{self, Device, MAX_GROUPS, NUM_SWITCHES, Occupancy, Switch};
+use crate::thunder::{self, Ble, Device, MAX_GROUPS, NUM_SWITCHES, Occupancy, Switch};
 
 const DEVICE_SECTION: &str = "device";
 const INDIVIDUAL_KEY: &str = "individual";
@@ -21,6 +21,11 @@ const FREQUENCY_KEY: &str = "frequency";
 const INTEGRATION_KEY: &str = "integration";
 const MIN_DISTANCE_KEY: &str = "min_distance";
 const MAX_DISTANCE_KEY: &str = "max_distance";
+const BLE_SECTION: &str = "ble";
+const PAIR_KEY: &str = "pair";
+const KNIXX_KEY: &str = "knixx";
+const ON: &str = "on";
+const OFF: &str = "off";
 /// UNBOUND is the value of an optional group address that is not set.
 const UNBOUND: &str = "-";
 
@@ -38,7 +43,7 @@ pub const MAX_VALUE: usize = MAX_GROUPS * "31/7/255".len() + (MAX_GROUPS - 1) * 
 pub const DEFAULT: &[u8] = include_bytes!("../default.ini");
 
 /// KEYS lists the parameters accessible through get and set, in file order.
-pub const KEYS: [&str; 13] = [
+pub const KEYS: [&str; 15] = [
     "device.individual",
     "A.group",
     "B.group",
@@ -52,6 +57,8 @@ pub const KEYS: [&str; 13] = [
     "occupancy.integration",
     "occupancy.min_distance",
     "occupancy.max_distance",
+    "ble.pair",
+    "ble.knixx",
 ];
 
 /// Store persists a configuration produced by format.
@@ -128,6 +135,8 @@ pub enum ValueError<'a> {
         min: u16,
         max: u16,
     },
+    /// "<quoted value> is not on or off"
+    OnOff(&'a str),
 }
 
 impl fmt::Display for ValueError<'_> {
@@ -142,6 +151,10 @@ impl fmt::Display for ValueError<'_> {
             Self::Number { value, min, max } => {
                 write_quoted(f, value)?;
                 write!(f, " is not a number from {min} to {max}")
+            }
+            Self::OnOff(value) => {
+                write_quoted(f, value)?;
+                f.write_str(" is not on or off")
             }
         }
     }
@@ -208,14 +221,15 @@ impl<'a> Ini<'a> {
 }
 
 /// parse reads the device's individual address, the group addresses of
-/// each switch, the optional sensor group addresses and the optional
-/// occupancy settings from ini file contents.
+/// each switch, the optional sensor group addresses, the optional
+/// occupancy settings and the optional BLE settings from ini file contents.
 pub fn parse(data: &[u8]) -> Result<Device, Error<'_>> {
     let text = core::str::from_utf8(data).map_err(|_| Error::Utf8)?;
     let ini = Ini::new(text)?;
 
     let mut dev = Device {
         occupancy: Occupancy::DEFAULT,
+        ble: Ble::DEFAULT,
         ..Default::default()
     };
 
@@ -257,9 +271,12 @@ pub fn parse(data: &[u8]) -> Result<Device, Error<'_>> {
         }
     }
 
-    // The occupancy section is optional too; missing keys keep their
-    // defaults.
-    for &(section, key, field) in FIELDS.iter().filter(|f| f.0 == OCCUPANCY_SECTION) {
+    // The occupancy and ble sections are optional too; missing keys keep
+    // their defaults.
+    for &(section, key, field) in FIELDS
+        .iter()
+        .filter(|f| f.0 == OCCUPANCY_SECTION || f.0 == BLE_SECTION)
+    {
         if let Some(v) = ini.section_get(section, key) {
             field
                 .slot(&mut dev)
@@ -318,6 +335,22 @@ fn parse_optional_group<'a>(value: &'a str, group: &mut u16) -> Result<(), Value
     Ok(())
 }
 
+/// parse_on_off reads "on" or "off", trimmed and in any case.
+fn parse_on_off(value: &str) -> Option<bool> {
+    let v = value.trim();
+    if v.eq_ignore_ascii_case(ON) {
+        Some(true)
+    } else if v.eq_ignore_ascii_case(OFF) {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+fn on_off(b: bool) -> &'static str {
+    if b { ON } else { OFF }
+}
+
 /// parse_number is strconv.ParseUint(value, 10, 16) on the trimmed value.
 fn parse_number(value: &str) -> Option<u16> {
     let digits = value.trim().as_bytes();
@@ -366,10 +399,12 @@ enum Field {
     Integration,
     MinDistance,
     MaxDistance,
+    Pair,
+    Knixx,
 }
 
 /// FIELDS maps the "section.key" names of all but the switches' values.
-const FIELDS: [(&str, &str, Field); 11] = [
+const FIELDS: [(&str, &str, Field); 13] = [
     (DEVICE_SECTION, INDIVIDUAL_KEY, Field::Individual),
     (TEMPERATURE_SECTION, GROUP_KEY, Field::Temperature),
     (HUMIDITY_SECTION, GROUP_KEY, Field::Humidity),
@@ -381,6 +416,8 @@ const FIELDS: [(&str, &str, Field); 11] = [
     (OCCUPANCY_SECTION, INTEGRATION_KEY, Field::Integration),
     (OCCUPANCY_SECTION, MIN_DISTANCE_KEY, Field::MinDistance),
     (OCCUPANCY_SECTION, MAX_DISTANCE_KEY, Field::MaxDistance),
+    (BLE_SECTION, PAIR_KEY, Field::Pair),
+    (BLE_SECTION, KNIXX_KEY, Field::Knixx),
 ];
 
 /// Slot points at the value a field refers to.
@@ -395,6 +432,8 @@ enum Slot<'d> {
         min: u16,
         max: u16,
     },
+    /// "on" or "off".
+    Flag(&'d mut bool),
 }
 
 impl Field {
@@ -451,6 +490,8 @@ impl Field {
                 min: thunder::MIN_MOTION_DISTANCE,
                 max: thunder::MAX_MOTION_DISTANCE,
             },
+            Field::Pair => Slot::Flag(&mut dev.ble.pair),
+            Field::Knixx => Slot::Flag(&mut dev.ble.knixx),
         }
     }
 }
@@ -473,6 +514,13 @@ impl Slot<'_> {
                 }
                 _ => Err(ValueError::Number { value, min, max }),
             },
+            Slot::Flag(b) => match parse_on_off(value) {
+                Some(v) => {
+                    *b = v;
+                    Ok(())
+                }
+                None => Err(ValueError::OnOff(value)),
+            },
         }
     }
 
@@ -483,6 +531,7 @@ impl Slot<'_> {
             Slot::Switch(sw) => write_groups(w, sw),
             Slot::Group(g) => write_optional_group(w, **g),
             Slot::Number { n, .. } => write!(w, "{}", **n),
+            Slot::Flag(b) => w.write_str(on_off(**b)),
         }
     }
 }
@@ -556,7 +605,7 @@ pub fn get<'a>(dev: &Device, key: &'a str) -> Result<Value, Error<'a>> {
 /// comma separated list; temperature.group, humidity.group,
 /// illuminance.group and occupancy.group take a single group address, or
 /// "-" to unbind it; the other occupancy keys take a number within their
-/// range; the distance window is not checked as a pair, see
+/// range; ble.pair and ble.knixx take on or off; the distance window is not checked as a pair, see
 /// Occupancy::distance_valid. dev is left untouched when value is invalid.
 pub fn set<'a>(dev: &mut Device, key: &'a str, value: &'a str) -> Result<(), Error<'a>> {
     let field = Field::resolve(dev, key)?;
@@ -633,6 +682,12 @@ fn write_ini(w: &mut impl Write, dev: &Device) -> fmt::Result {
             o.min_distance, o.max_distance
         )?;
     }
+    write!(
+        w,
+        "\n[{BLE_SECTION}]\n{PAIR_KEY} = {}\n{KNIXX_KEY} = {}\n",
+        on_off(dev.ble.pair),
+        on_off(dev.ble.knixx)
+    )?;
     Ok(())
 }
 

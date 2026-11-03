@@ -124,12 +124,39 @@ impl Occupancy {
     }
 }
 
+/// Ble configures the board's Bluetooth LE services.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Ble {
+    /// pair makes the console (NUS) and the knixx service require a paired
+    /// central: an encrypted link, with a bond made while NUS is on.
+    pub pair: bool,
+    /// knixx keeps the board advertising the knixx service, for a web app
+    /// to send and receive group telegrams; a firmware built without it
+    /// ignores it.
+    pub knixx: bool,
+}
+
+impl Ble {
+    /// DEFAULT is the setting of a configuration without the section.
+    pub const DEFAULT: Ble = Ble {
+        pair: true,
+        knixx: false,
+    };
+}
+
+impl Default for Ble {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Device {
     pub individual: u16,
     pub switches: [Switch; NUM_SWITCHES],
     pub sensor: Sensor,
     pub occupancy: Occupancy,
+    pub ble: Ble,
 }
 
 impl Device {

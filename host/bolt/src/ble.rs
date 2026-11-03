@@ -30,9 +30,47 @@ pub async fn connect(
     let p = found.peripheral;
     let gone = watch_disconnect(&adapter, &p).await?;
     eprintln!("connecting to {}", found.id);
-    p.connect().await.context("connect")?;
-    p.discover_services().await.context("discover services")?;
+    p.connect().await.context("connect").map_err(pairing_hint)?;
+    p.discover_services()
+        .await
+        .context("discover services")
+        .map_err(pairing_hint)?;
     Ok((p, gone))
+}
+
+/// Adds what to do to an error that comes of pairing: the board refuses a
+/// central that is not paired while ble.pair is on, and drops one whose bond
+/// it forgot.
+pub fn pairing_hint(e: anyhow::Error) -> anyhow::Error {
+    let text = format!("{e:#}").to_lowercase();
+    if [
+        "encrypt",
+        "authenticat",
+        "not paired",
+        "notpermitted",
+        "not permitted",
+    ]
+    .iter()
+    .any(|w| text.contains(w))
+    {
+        let how = if cfg!(target_os = "linux") {
+            "pair once with bluetoothctl pair <address> while nus is on"
+        } else {
+            "connect while nus is on and accept the pairing request"
+        };
+        return e.context(format!("the board wants a paired central (ble.pair on): {how}"));
+    }
+    if text.contains("disconnected") {
+        let how = if cfg!(target_os = "linux") {
+            "bluetoothctl remove <address>"
+        } else {
+            "remove knixx in the Bluetooth settings"
+        };
+        return e.context(format!(
+            "if the board forgot this computer (ble forget), forget the board too: {how}, then connect while nus is on"
+        ));
+    }
+    e
 }
 
 /// Returns a watch that turns true once p disconnects: the adapter reports

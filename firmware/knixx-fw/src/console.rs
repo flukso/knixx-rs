@@ -26,7 +26,7 @@ use knixx_ui::switches::HOLD_TIME;
 
 use knixx_console::upload::{Event, Upload};
 
-use crate::{boot, leds, nus, panic, script, storage, usbcdc};
+use crate::{bonds, boot, leds, nus, panic, script, storage, usbcdc};
 
 const PROMPT: &str = ">>> ";
 
@@ -73,6 +73,12 @@ pub fn request_nus(on: bool) {
 
 fn on_nus() -> bool {
     ON_NUS.load(Ordering::Relaxed)
+}
+
+/// Whether a central may pair and bond: while the console runs on NUS,
+/// which takes the USB console or the wall switch gesture.
+pub fn pairing_window() -> bool {
+    on_nus()
 }
 
 /// The time since boot, for the idle timer and uploads.
@@ -160,6 +166,8 @@ impl knixx_cli::Ctx for Ctx {
 
     fn set_device(&mut self, dev: Device) {
         DEVICE.lock(|d| d.set(Some(dev)));
+        // ble.pair may have changed: the BLE task checks its central.
+        crate::bonds::CHANGED.signal(());
     }
 
     /// Queues cmd for the bus. A full queue, which the caller reports on
@@ -181,7 +189,7 @@ impl knixx_cli::Ctx for Ctx {
     }
 }
 
-const fn commands() -> [Cmd<Ctx>; knixx_cli::NUM_SHARED + 7] {
+const fn commands() -> [Cmd<Ctx>; knixx_cli::NUM_SHARED + 8] {
     let s = knixx_cli::commands::<Ctx>();
     [
         s[0],
@@ -202,6 +210,11 @@ const fn commands() -> [Cmd<Ctx>; knixx_cli::NUM_SHARED + 7] {
             name: "nus",
             help: "nus on|off: move the console to BLE (Nordic UART Service) or back to USB",
             run: nus_cmd,
+        },
+        Cmd {
+            name: "ble",
+            help: "ble | ble forget all|<address>: show the pairing setting and the bonded centrals, or forget them",
+            run: ble_cmd,
         },
         Cmd {
             name: "script",
@@ -226,7 +239,7 @@ const fn commands() -> [Cmd<Ctx>; knixx_cli::NUM_SHARED + 7] {
     ]
 }
 
-static COMMANDS: [Cmd<Ctx>; knixx_cli::NUM_SHARED + 7] = commands();
+static COMMANDS: [Cmd<Ctx>; knixx_cli::NUM_SHARED + 8] = commands();
 
 fn version(_: &mut Ctx, _: &[&str], w: &mut dyn Write) -> Action {
     let _ = writeln!(w, "{VERSION}");
@@ -297,6 +310,12 @@ fn nus_cmd(_: &mut Ctx, args: &[&str], w: &mut dyn Write) -> Action {
                 nus::NAME,
                 IDLE_TIMEOUT.as_secs()
             );
+            if device().ble.pair {
+                let _ = writeln!(
+                    w,
+                    "nus: pairing open: a new central pairs on connecting, until nus off"
+                );
+            }
             Action::Nus(true)
         }
         ["off"] => {
@@ -312,6 +331,47 @@ fn nus_cmd(_: &mut Ctx, args: &[&str], w: &mut dyn Write) -> Action {
             Action::None
         }
     }
+}
+
+/// ble [forget all|<address>]: shows ble.pair and the bonds, or forgets
+/// bonds.
+fn ble_cmd(_: &mut Ctx, args: &[&str], w: &mut dyn Write) -> Action {
+    match args {
+        [] => {
+            let pair = if device().ble.pair { "on" } else { "off" };
+            let list = bonds::list();
+            let _ = writeln!(w, "ble: pairing {pair}, {} of {} bonds", list.len(), bonds::MAX);
+            for b in &list {
+                let _ = writeln!(w, "  {b}");
+            }
+            let _ = writeln!(w, "ble: last link: {}", crate::ble::service_changed());
+        }
+        ["forget", which] => {
+            let (n, saved) = if which.eq_ignore_ascii_case("all") {
+                bonds::forget(|_| true)
+            } else if let Some(a) = bonds::Addr::parse(which) {
+                bonds::forget(|b| b.addr().0 == a.0)
+            } else {
+                let _ = writeln!(w, "ble: {which} is not a BLE address (aa:bb:cc:dd:ee:ff)");
+                return Action::None;
+            };
+            match (n, saved) {
+                (0, _) => {
+                    let _ = writeln!(w, "ble: no such bond");
+                }
+                (n, Ok(())) => {
+                    let _ = writeln!(w, "ble: {n} bond(s) forgotten (saved)");
+                }
+                (n, Err(e)) => {
+                    let _ = writeln!(w, "ble: {n} bond(s) forgotten (not saved: {e})");
+                }
+            }
+        }
+        _ => {
+            let _ = writeln!(w, "usage: ble [forget all|<address>]");
+        }
+    }
+    Action::None
 }
 
 fn ota(_: &mut Ctx, _: &[&str], w: &mut dyn Write) -> Action {

@@ -3,6 +3,9 @@ use crate::thunder::Sensor;
 use std::string::ToString;
 use std::vec::Vec;
 
+/// BLE is the ble section as format writes it for Ble::DEFAULT.
+const BLE: &str = "\n[ble]\npair = on\nknixx = off\n";
+
 fn fmt(dev: &Device) -> std::string::String {
     let mut buf = [0; MAX_FILE];
     std::str::from_utf8(format(dev, &mut buf)).unwrap().into()
@@ -188,14 +191,14 @@ fn sensor() {
     }
     assert_eq!(
         fmt(&dev),
-        "[device]\nindividual = 7.8.1\n\n[A]\ngroup = 0/0/1\n\n[B]\ngroup = 0/0/2\n"
+        std::format!("[device]\nindividual = 7.8.1\n\n[A]\ngroup = 0/0/1\n\n[B]\ngroup = 0/0/2\n{BLE}")
     );
 
     set(&mut dev, "illuminance.group", "0/1/3").unwrap();
     assert_eq!(dev.sensor.illuminance, GroupAddress::new3(0, 1, 3).0);
     assert_eq!(
         fmt(&dev),
-        std::format!("{NO_SENSOR2}\n[illuminance]\ngroup = 0/1/3\n")
+        std::format!("{NO_SENSOR2}\n[illuminance]\ngroup = 0/1/3\n{BLE}")
     );
     round_trip(&dev);
     for value in ["", "0/1/3, 0/1/4", "0/0/0", "lux"] {
@@ -220,7 +223,7 @@ fn sensor() {
     assert_eq!(dev.sensor, want);
     assert_eq!(
         fmt(&dev),
-        std::format!("{NO_SENSOR2}\n[humidity]\ngroup = 1/2/3\n")
+        std::format!("{NO_SENSOR2}\n[humidity]\ngroup = 1/2/3\n{BLE}")
     );
 
     set(&mut dev, "Temperature.Group", "0/1/1").unwrap();
@@ -260,7 +263,7 @@ fn occupancy() {
     assert_eq!(dev.occupancy, defaults, "occupancy without a section");
     assert_eq!(
         fmt(&dev),
-        "[device]\nindividual = 7.8.1\n\n[A]\ngroup = 0/0/1\n\n[B]\ngroup = 0/0/2\n"
+        std::format!("[device]\nindividual = 7.8.1\n\n[A]\ngroup = 0/0/1\n\n[B]\ngroup = 0/0/2\n{BLE}")
     );
 
     let def = parse(DEFAULT).unwrap();
@@ -479,8 +482,57 @@ fn format_fits() {
             min_distance: 65535,
             max_distance: 65535,
         },
+        ble: Ble {
+            pair: false,
+            knixx: false,
+        },
     };
     let text = fmt(&dev);
-    assert!(text.ends_with("max_distance = 65535\n"), "{text}");
+    assert!(
+        text.ends_with("max_distance = 65535\n\n[ble]\npair = off\nknixx = off\n"),
+        "{text}"
+    );
     assert_eq!(get(&dev, "A.group").unwrap().len(), MAX_VALUE);
+}
+
+#[test]
+fn ble() {
+    // Without the section, pairing is on and the knixx service off.
+    let dev = parse(b"[device]\nindividual = 1.1.1\n[A]\ngroup = 0/0/1\n[B]\ngroup = 0/0/2\n").unwrap();
+    assert_eq!(dev.ble, Ble::DEFAULT);
+    assert!(dev.ble.pair && !dev.ble.knixx);
+    assert!(fmt(&dev).ends_with("\n[ble]\npair = on\nknixx = off\n"));
+
+    // A missing key keeps its default.
+    let dev =
+        parse(b"[device]\nindividual = 1.1.1\n[A]\ngroup = 0/0/1\n[B]\ngroup = 0/0/2\n[ble]\nknixx = on\n")
+            .unwrap();
+    assert_eq!(
+        dev.ble,
+        Ble {
+            pair: true,
+            knixx: true
+        }
+    );
+    round_trip(&dev);
+
+    let mut dev = parse(DEFAULT).unwrap();
+    assert_eq!(dev.ble, Ble::DEFAULT);
+    for (value, want) in [("off", false), ("ON", true), (" Off ", false), ("on", true)] {
+        set(&mut dev, "ble.pair", value).unwrap();
+        assert_eq!(dev.ble.pair, want, "{value:?}");
+        assert_eq!(get(&dev, "ble.pair").unwrap(), if want { "on" } else { "off" });
+    }
+    set(&mut dev, "BLE.Knixx", "on").unwrap();
+    assert!(dev.ble.knixx);
+    round_trip(&dev);
+
+    let before = dev;
+    let err = set(&mut dev, "ble.pair", "yes").unwrap_err();
+    assert_eq!(err.to_string(), "config: ble.pair: \"yes\" is not on or off");
+    assert_eq!(dev, before);
+    let err =
+        parse(b"[device]\nindividual = 1.1.1\n[A]\ngroup = 0/0/1\n[B]\ngroup = 0/0/2\n[ble]\npair = 1\n")
+            .unwrap_err();
+    assert_eq!(err.to_string(), "config: [ble] pair: \"1\" is not on or off");
 }

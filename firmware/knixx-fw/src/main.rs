@@ -15,6 +15,7 @@ use nrf_mpsl::MultiprotocolServiceLayer;
 use static_cell::StaticCell;
 
 mod ble;
+mod bonds;
 mod boot;
 mod bus;
 mod console;
@@ -86,6 +87,7 @@ async fn main(spawner: Spawner) {
     };
     let (dev, ok) = console::BOOT_LOG.lock(|l| storage::load(p.QSPI, Irqs, pins, &mut *l.borrow_mut()));
     console::DEVICE.lock(|d| d.set(Some(dev)));
+    console::BOOT_LOG.lock(|l| bonds::load(&mut *l.borrow_mut()));
     if !ok {
         leds::signal(Mode::Error);
     }

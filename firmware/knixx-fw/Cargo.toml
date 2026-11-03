@@ -30,7 +30,7 @@ static_cell = "2.1.1"
 heapless = "0.9"
 rlsf = { version = "0.2.3", optional = true }
 knixx-script = { path = "../../crates/knixx-script", default-features = false, features = ["no_std"], optional = true }
-trouble-host = { version = "0.8.0", default-features = false, features = ["peripheral", "gatt", "default-packet-pool", "derive"] }
+trouble-host = { version = "0.8.0", default-features = false, features = ["peripheral", "gatt", "default-packet-pool", "derive", "security", "security-p256-cortex-m4"] }
 
 [features]
 default = ["scripts"]

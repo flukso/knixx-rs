@@ -195,7 +195,6 @@ fn with_flash<R>(
 }
 
 /// Reads the file at path into buf and returns its length.
-#[cfg_attr(not(feature = "scripts"), allow(dead_code))]
 pub fn read_file(path: &str, buf: &mut [u8]) -> Result<usize, FileError> {
     with_flash(|fl| knixx_storage::read(fl, path, buf))
 }

@@ -9,15 +9,24 @@
 //! The BLE task serves the console's NUS port (see nus): it advertises
 //! while the console asks for it, accepts one central, hands its writes to
 //! the console and notifies it of the console's output.
+//!
+//! Pairing: while the configuration's ble.pair is on, NUS serves only a
+//! central on an encrypted link that is bonded (see bonds) or paired while
+//! NUS is on, the pairing window. Its requests are refused with
+//! "insufficient encryption" until then, on which the central's OS pairs
+//! (LE Secure Connections, Just Works) or encrypts with its bond. The check
+//! is made at run time, rather than with the GATT table's permissions, so
+//! that ble.pair can change without a reboot.
 
 use core::fmt::Write;
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicU8, Ordering};
 
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
-use embassy_futures::select::{Either, select};
+use embassy_futures::select::{Either, Either3, select, select3};
 use embassy_nrf::mode::Async;
 use embassy_nrf::rng::Rng;
+use embassy_sync::once_lock::OnceLock;
 use embassy_time::{Duration, Instant, Timer, with_timeout};
 use knixx_console::nus as framing;
 use nrf_mpsl::MultiprotocolServiceLayer;
@@ -25,7 +34,7 @@ use nrf_sdc::{self as sdc, SoftdeviceController};
 use static_cell::StaticCell;
 use trouble_host::prelude::*;
 
-use crate::nus;
+use crate::{bonds, console, nus};
 
 /// Outgoing and incoming L2CAP buffers per link.
 const L2CAP_TXQ: u8 = 3;
@@ -49,7 +58,20 @@ const NUS_UUID_LE: [u8; 16] = [
     0x9e, 0xca, 0xdc, 0x24, 0x0e, 0xe5, 0xa9, 0xe0, 0x93, 0xf3, 0xa3, 0xb5, 0x01, 0x00, 0x40, 0x6e,
 ];
 
-#[gatt_server]
+/// The size of the attribute table: the services' attributes, and the GAP
+/// and GATT services that ble_task adds, Service Changed included.
+const ATTRIBUTES: usize = 40;
+
+/// The GATT database as centrals see it: the Service Changed
+/// characteristic, and the hash of the database, which bonds keep.
+struct Db {
+    service_changed: Characteristic<[u8; 4]>,
+    hash: u128,
+}
+
+static DB: OnceLock<Db> = OnceLock::new();
+
+#[gatt_server(attribute_table_size = ATTRIBUTES)]
 struct Server {
     nus: NusService,
 }
@@ -115,56 +137,77 @@ async fn ble_task(sdc: SoftdeviceController<'static>) -> ! {
     addr[5] |= 0xC0; // static random
     let address = Address::random([addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]]);
 
-    static RESOURCES: StaticCell<HostResources<DefaultPacketPool, 1, 2>> = StaticCell::new();
+    // One bond more than bonds::MAX: the host stores a new bond itself, so
+    // it needs room for it before the oldest is dropped.
+    static RESOURCES: StaticCell<HostResources<DefaultPacketPool, 1, 2, 1, { bonds::MAX + 1 }>> =
+        StaticCell::new();
     static STACK: StaticCell<Stack> = StaticCell::new();
     let stack = STACK.init(
         trouble_host::new(sdc, RESOURCES.init(HostResources::new()))
             .set_random_address(address)
+            .set_io_capabilities(IoCapabilities::NoInputNoOutput)
             .build(),
     );
+    for b in bonds::list() {
+        let _ = stack.add_bond_information(b.info());
+    }
     let mut runner = stack.runner();
     let mut peripheral = stack.peripheral();
+    // The GAP service, and the GATT service with Service Changed, which
+    // GapConfig leaves out.
+    let mut table = AttributeTable::new();
+    let mut gap = table.add_service(Service::new(service::GAP));
+    gap.add_characteristic_ro(characteristic::DEVICE_NAME, nus::NAME);
+    gap.add_characteristic_ro(characteristic::APPEARANCE, &appearance::UNKNOWN);
+    gap.build();
+    static SERVICE_CHANGED: StaticCell<[u8; 4]> = StaticCell::new();
+    let mut gatt = table.add_service(Service::new(service::GATT));
+    let service_changed = gatt
+        .add_characteristic(
+            characteristic::SERVICE_CHANGED,
+            [CharacteristicProp::Indicate],
+            [0u8; 4],
+            SERVICE_CHANGED.init([0; 4]),
+        )
+        .build();
+    gatt.build();
     static SERVER: StaticCell<Server> = StaticCell::new();
-    let server = SERVER.init(
-        Server::new_with_config(GapConfig::Peripheral(PeripheralConfig {
-            name: nus::NAME,
-            appearance: &appearance::UNKNOWN,
-        }))
-        .expect("gatt server"),
-    );
+    let server = SERVER.init(Server::new(table));
+    let _ = DB.init(Db {
+        service_changed,
+        hash: server.table().hash(),
+    });
 
     let _ = embassy_futures::join::join(runner.run(), serve(stack, &mut peripheral, server)).await;
     panic!("ble: the host runner stopped");
 }
 
-/// Advertises while the console asks for it and serves one central at a
-/// time.
+/// Advertises while NUS is on and serves one central at a time.
 async fn serve(
     stack: &'static Stack,
     peripheral: &mut Peripheral<'static, SoftdeviceController<'static>, DefaultPacketPool>,
     server: &'static Server<'static>,
 ) {
     let mut adv_data = [0u8; 31];
-    let len = AdStructure::encode_slice(
-        &[
-            AdStructure::Flags(LE_GENERAL_DISCOVERABLE | BR_EDR_NOT_SUPPORTED),
-            AdStructure::CompleteServiceUuids128(&[NUS_UUID_LE]),
-            AdStructure::CompleteLocalName(nus::NAME.as_bytes()),
-        ],
-        &mut adv_data,
-    )
-    .expect("advertising data");
+    let mut scan_data = [0u8; 31];
+    let (len, scan_len) = advertising(&mut adv_data, &mut scan_data);
     let adv = Advertisement::ConnectableScannableUndirected {
         adv_data: &adv_data[..len],
-        scan_data: &[],
+        scan_data: &scan_data[..scan_len],
     };
 
-    let mut on = false;
+    // Whether the console asked for NUS: the last CONTROL.
+    let mut nus_on = false;
     loop {
-        if !on {
-            on = nus::CONTROL.wait().await;
-            if !on {
-                nus::OFF_DONE.signal(());
+        if !nus_on {
+            match select(nus::CONTROL.wait(), bonds::CHANGED.wait()).await {
+                Either::First(c) => {
+                    nus_on = c;
+                    if !nus_on {
+                        nus::OFF_DONE.signal(());
+                    }
+                }
+                Either::Second(()) => sync_bonds(stack),
             }
             continue;
         }
@@ -174,74 +217,276 @@ async fn serve(
                 .await?;
             Ok::<_, BleHostError<_>>(advertiser.accept().await?.with_attribute_server(server)?)
         };
-        let conn = match select(accept, nus::CONTROL.wait()).await {
-            Either::First(Ok(conn)) => conn,
-            Either::First(Err(_)) => {
+        // The advertising stops as its future is dropped.
+        let conn = match select3(accept, nus::CONTROL.wait(), bonds::CHANGED.wait()).await {
+            Either3::First(Ok(conn)) => conn,
+            Either3::First(Err(_)) => {
                 Timer::after_secs(1).await;
                 continue;
             }
-            Either::Second(c) => {
-                // The advertising stops as its future is dropped.
-                on = c;
-                if !on {
+            Either3::Second(c) => {
+                nus_on = c;
+                if !nus_on {
                     nus::OFF_DONE.signal(());
                 }
+                continue;
+            }
+            Either3::Third(()) => {
+                sync_bonds(stack);
                 continue;
             }
         };
 
         nus::OUT.lock(|q| q.borrow_mut().reset());
-        nus::CONNECTED.store(true, Ordering::Relaxed);
-        let params = async {
-            let params = RequestedConnParams {
-                min_connection_interval: INTERVAL,
-                max_connection_interval: INTERVAL,
-                supervision_timeout: SUPERVISION,
-                ..Default::default()
+        // Bonding is offered only in the pairing window; a pairing outside
+        // it gives no bond, and the link is dropped.
+        let _ = conn.raw().set_bondable(console::pairing_window());
+        if allowed(&conn) {
+            nus::CONNECTED.store(true, Ordering::Relaxed);
+        } else {
+            // The central's OS pairs, or encrypts with its bond, at once.
+            let _ = conn.raw().request_security();
+        }
+        let mut first = true;
+        loop {
+            let params = async {
+                if !core::mem::take(&mut first) {
+                    return;
+                }
+                let params = RequestedConnParams {
+                    min_connection_interval: INTERVAL,
+                    max_connection_interval: INTERVAL,
+                    supervision_timeout: SUPERVISION,
+                    ..Default::default()
+                };
+                if let Err(e) = conn.raw().update_connection_params(stack, &params).await {
+                    let _ = writeln!(crate::console::Out, "nus: connection interval: {e:?}");
+                }
             };
-            if let Err(e) = conn.raw().update_connection_params(stack, &params).await {
-                let _ = writeln!(crate::console::Out, "nus: connection interval: {e:?}");
+            // The sender watches for nus on and off between notifications, so
+            // that none is cut off halfway.
+            let ctl = match select(join(params, events(stack, server, &conn)), send(server, &conn)).await {
+                Either::Second(Some(on)) => on,
+                _ => break,
+            };
+            if ctl {
+                // The console asks for nus on only while NUS is off.
+                continue;
             }
-        };
-
-        // The sender watches for nus off between notifications, so that none
-        // is cut off halfway.
-        let off = matches!(
-            select(join(params, events(server, &conn)), send(server, &conn)).await,
-            Either::Second(true)
-        );
-        if off {
-            // Let the queued output, such as the reply to nus off, reach the
-            // central before the link drops.
+            // nus off: let the queued output, such as the reply to nus off,
+            // reach the central.
+            nus_on = false;
             let deadline = Instant::now() + FLUSH_TIMEOUT;
             while nus::OUT.lock(|q| q.borrow().buffered() > 0) && Instant::now() < deadline {
                 if send_pending(server, &conn).await.is_err() {
                     break;
                 }
             }
+            nus::OUT.lock(|q| q.borrow_mut().reset());
             conn.raw().disconnect();
             let _ = with_timeout(FLUSH_TIMEOUT, async {
                 while !matches!(conn.next().await, GattConnectionEvent::Disconnected { .. }) {}
             })
             .await;
+            nus::CONNECTED.store(false, Ordering::Relaxed);
+            nus::OFF_DONE.signal(());
+            break;
         }
         nus::CONNECTED.store(false, Ordering::Relaxed);
         nus::OUT.lock(|q| q.borrow_mut().reset());
-        if off {
-            on = false;
-            nus::OFF_DONE.signal(());
+    }
+}
+
+/// Fills the advertising data, and the scan response, which stays empty,
+/// and returns their lengths.
+fn advertising(adv: &mut [u8; 31], _scan: &mut [u8; 31]) -> (usize, usize) {
+    let len = AdStructure::encode_slice(
+        &[
+            AdStructure::Flags(LE_GENERAL_DISCOVERABLE | BR_EDR_NOT_SUPPORTED),
+            AdStructure::CompleteServiceUuids128(&[NUS_UUID_LE]),
+            AdStructure::CompleteLocalName(nus::NAME.as_bytes()),
+        ],
+        adv,
+    )
+    .expect("advertising data");
+    (len, 0)
+}
+
+/// Whether ble.pair is on.
+fn pair() -> bool {
+    console::device().ble.pair
+}
+
+/// Whether the central may use the services: always without ble.pair, else
+/// on an encrypted link with a bonded central, or with any central in the
+/// pairing window.
+fn allowed(conn: &Conn) -> bool {
+    if !pair() {
+        return true;
+    }
+    let raw = conn.raw();
+    let encrypted = raw.security_level().is_ok_and(|l| l.encrypted());
+    encrypted && (console::pairing_window() || raw.is_bonded_peer())
+}
+
+/// Lets the central in once allowed, or drops it when it no longer is: after
+/// its pairing or encryption, a change of ble.pair or a forgotten bond. It
+/// reports whether the central may stay.
+fn admit(conn: &Conn) -> bool {
+    if allowed(conn) {
+        if !nus::CONNECTED.swap(true, Ordering::Relaxed) {
+            nus::WAKE.signal(());
+        }
+        return true;
+    }
+    if conn.raw().security_level().is_ok_and(|l| l.encrypted()) || nus::connected() {
+        nus::CONNECTED.store(false, Ordering::Relaxed);
+        conn.raw().disconnect();
+        return false;
+    }
+    true
+}
+
+/// Drops the bonds from the host that are no longer in bonds, after a
+/// bond was forgotten.
+fn sync_bonds(stack: &Stack) {
+    let mut gone: heapless::Vec<Identity, { bonds::MAX + 1 }> = heapless::Vec::new();
+    stack.with_bond_information(|list| {
+        for b in list.iter().filter(|b| !bonds::contains(b)) {
+            let _ = gone.push(b.identity);
+        }
+    });
+    for id in gone {
+        let _ = stack.remove_bond_information(id);
+    }
+}
+
+/// Keeps a new bond, dropping the oldest when there are bonds::MAX already.
+fn keep_bond(stack: &Stack, info: &BondInformation) {
+    // The central discovers the services as they are now.
+    let hash = DB.try_get().map_or(0, |db| db.hash);
+    let b = bonds::Bond::from_info(info, hash);
+    let (evicted, saved) = bonds::add(b);
+    if let Some(old) = evicted {
+        let _ = stack.remove_bond_information(old.info().identity);
+    }
+    match saved {
+        Ok(()) => {
+            let _ = writeln!(console::Out, "ble: bonded with {b}");
+        }
+        Err(e) => {
+            let _ = writeln!(console::Out, "ble: bonded with {b} (not saved: {e})");
         }
     }
 }
 
-/// Handles the central's GATT requests until it disconnects: writes of RX
-/// go to the console.
-async fn events(server: &'static Server<'static>, conn: &Conn) {
+/// Tells a bonded central whose cached GATT database is not the current
+/// one, after a firmware update, to discover the services again: the
+/// Service Changed indication over all handles. The central subscribed to
+/// it once, which a bond keeps; the board does not store subscriptions, so
+/// it sets this one again. Once confirmed, the bond records the database.
+async fn services_changed(server: &'static Server<'static>, conn: &Conn) {
+    let Some(db) = DB.try_get() else { return };
+    let id = conn.raw().peer_identity();
+    if !bonds::stale(&id, db.hash) {
+        SERVICE_CHANGED.store(SC_CURRENT, Ordering::Relaxed);
+        return;
+    }
+    if let (Some(cccd), Some(mut t)) = (
+        db.service_changed.cccd_handle,
+        server.get_client_att_table(conn.raw()),
+    ) && t.write(cccd, 0, &[0x02, 0x00]).is_ok()
+    {
+        server.set_client_att_table(conn.raw(), &t.view());
+    }
+    let all = [0x01, 0x00, 0xff, 0xff];
+    let sent = with_timeout(FLUSH_TIMEOUT * 5, db.service_changed.indicate(conn, &all, false)).await;
+    let outcome = match sent {
+        Ok(Ok(())) => {
+            let _ = bonds::seen(&id, db.hash);
+            SC_CONFIRMED
+        }
+        Ok(Err(_)) => SC_FAILED,
+        Err(_) => SC_TIMEOUT,
+    };
+    SERVICE_CHANGED.store(outcome, Ordering::Relaxed);
+}
+
+/// What the last encrypted link of a bonded central did about Service
+/// Changed, for the ble command.
+pub static SERVICE_CHANGED: AtomicU8 = AtomicU8::new(SC_NONE);
+const SC_NONE: u8 = 0;
+const SC_CURRENT: u8 = 1;
+const SC_CONFIRMED: u8 = 2;
+const SC_FAILED: u8 = 3;
+const SC_TIMEOUT: u8 = 4;
+
+/// SERVICE_CHANGED as text.
+pub fn service_changed() -> &'static str {
+    match SERVICE_CHANGED.load(Ordering::Relaxed) {
+        SC_CURRENT => "the central had the current services",
+        SC_CONFIRMED => "service changed indicated and confirmed",
+        SC_FAILED => "service changed not sent",
+        SC_TIMEOUT => "service changed not confirmed",
+        _ => "no bonded central encrypted yet",
+    }
+}
+
+/// The handles that need a paired central: those of NUS.
+fn guarded(server: &Server, handle: u16) -> bool {
+    let nus = &server.nus;
+    handle == nus.rx.handle || handle == nus.tx.handle || Some(handle) == nus.tx.cccd_handle
+}
+
+/// The handle a GATT request is for.
+fn handle_of(event: &GattEvent<'_, '_, DefaultPacketPool>) -> Option<u16> {
+    match event {
+        GattEvent::Read(r) => Some(r.handle()),
+        GattEvent::Write(w) => Some(w.handle()),
+        _ => None,
+    }
+}
+
+/// Handles the central's GATT requests and security events until it
+/// disconnects: writes of RX go to the console.
+async fn events(stack: &'static Stack, server: &'static Server<'static>, conn: &Conn) {
     let rx = server.nus.rx.handle;
     loop {
-        match conn.next().await {
+        let event = match select(conn.next(), bonds::CHANGED.wait()).await {
+            Either::First(e) => e,
+            Either::Second(()) => {
+                sync_bonds(stack);
+                admit(conn);
+                continue;
+            }
+        };
+        match event {
             GattConnectionEvent::Disconnected { .. } => return,
+            GattConnectionEvent::PairingComplete { bond, .. } => {
+                if let Some(info) = bond {
+                    if console::pairing_window() {
+                        keep_bond(stack, &info);
+                    } else {
+                        let _ = stack.remove_bond_information(info.identity);
+                    }
+                }
+                admit(conn);
+            }
+            GattConnectionEvent::Encrypted { .. } => {
+                if admit(conn) {
+                    services_changed(server, conn).await;
+                }
+            }
+            GattConnectionEvent::PairingFailed(e) => {
+                let _ = writeln!(console::Out, "ble: pairing failed: {e:?}");
+            }
             GattConnectionEvent::Gatt { event } => {
+                if pair() && handle_of(&event).is_some_and(|h| guarded(server, h)) && !allowed(conn) {
+                    if let Ok(reply) = event.reject(AttErrorCode::INSUFFICIENT_ENCRYPTION) {
+                        reply.send().await;
+                    }
+                    continue;
+                }
                 if let GattEvent::Write(w) = &event
                     && w.handle() == rx
                 {
@@ -258,24 +503,18 @@ async fn events(server: &'static Server<'static>, conn: &Conn) {
 }
 
 /// Notifies the central of the console output as it is queued, until the
-/// central is gone (false) or the console asks for nus off (true). The
-/// console asks for nus on only while NUS is off, so that the control
-/// signal means off here.
-async fn send(server: &'static Server<'static>, conn: &Conn) -> bool {
+/// central is gone (None) or the console asks for nus on or off (Some).
+async fn send(server: &'static Server<'static>, conn: &Conn) -> Option<bool> {
     loop {
         match select(nus::WAKE.wait(), nus::CONTROL.wait()).await {
             Either::First(()) => {
                 while nus::OUT.lock(|q| q.borrow().buffered() > 0) {
                     if send_pending(server, conn).await.is_err() {
-                        return false;
+                        return None;
                     }
                 }
             }
-            Either::Second(on) => {
-                if !on {
-                    return true;
-                }
-            }
+            Either::Second(on) => return Some(on),
         }
     }
 }

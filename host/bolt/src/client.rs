@@ -124,7 +124,10 @@ impl Client {
             bail!("no NUS service: run nus on on the knixx console");
         };
         let mut notes = p.notifications().await.context("TX notifications")?;
-        p.subscribe(&txc).await.context("TX notifications")?;
+        p.subscribe(&txc)
+            .await
+            .context("TX notifications")
+            .map_err(ble::pairing_hint)?;
         let (tx, incoming) = mpsc::unbounded_channel();
         let uuid = txc.uuid;
         tokio::spawn(async move {
@@ -150,7 +153,10 @@ impl Client {
             Link::Usb(port) => port.write_all(p).context("write")?,
             Link::Ble { p: per, rx, chunk } => {
                 for c in p.chunks(*chunk) {
-                    per.write(rx, c, WriteType::WithResponse).await.context("write")?;
+                    per.write(rx, c, WriteType::WithResponse)
+                        .await
+                        .context("write")
+                        .map_err(ble::pairing_hint)?;
                 }
             }
         }

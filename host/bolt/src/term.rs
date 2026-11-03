@@ -229,7 +229,10 @@ async fn term_ble(o: &Options) -> Result<()> {
             bail!("NUS service lacks its RX or TX characteristic");
         };
         let mut notes = p.notifications().await.context("TX notifications")?;
-        p.subscribe(&tx).await.context("TX notifications")?;
+        p.subscribe(&tx)
+            .await
+            .context("TX notifications")
+            .map_err(ble::pairing_hint)?;
         let tx_uuid = tx.uuid;
         tokio::spawn(async move {
             let mut out = std::io::stdout();

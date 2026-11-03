@@ -215,6 +215,7 @@ the firmware, so that a board can be flashed without building it:
 | `knixx-dfu.zip` | the firmware as a DFU package (BLE) |
 | `knixx.hex`, `knixx.elf` | the firmware for a debug probe, and with its symbols |
 | `knixx-web-ble.uf2`, `knixx-web-ble-dfu.zip`, … | the firmware with the knixx GATT service for the [web app](#web-app) |
+| `knixx-web-ble-coded.uf2`, `knixx-web-ble-coded-dfu.zip`, … | the same with long-range BLE on the coded PHY, see [Radio](#radio) |
 | `bolt-<tag>-<target>.tar.gz` | `bolt` for Linux (x86_64, aarch64) and Apple Silicon macOS |
 
 Double-tap reset to get the bootloader's `FTHR840BOOT` drive and copy a

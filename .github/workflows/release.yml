@@ -33,13 +33,21 @@ jobs:
       - name: Build
         # build/knixx.{elf,uf2,hex} and build/knixx-dfu.zip; the web-ble
         # build, with the knixx GATT service for the web app, as
-        # knixx-web-ble.*, for the tags that have the feature.
+        # knixx-web-ble.*, and that build with the coded PHY too as
+        # knixx-web-ble-coded.*, for the tags that have the features.
         run: |
+          keep_as() {
+            for f in knixx.elf knixx.uf2 knixx.hex knixx-dfu.zip; do
+              mv build/$f build/${f/knixx/$1}
+            done
+          }
           if grep -q '^web-ble' firmware/knixx-fw/Cargo.toml; then
             cargo xtask build --web-ble
-            for f in knixx.elf knixx.uf2 knixx.hex knixx-dfu.zip; do
-              mv build/$f build/${f/knixx/knixx-web-ble}
-            done
+            keep_as knixx-web-ble
+          fi
+          if grep -q '^coded-phy' firmware/knixx-fw/Cargo.toml; then
+            cargo xtask build --web-ble --coded-phy
+            keep_as knixx-web-ble-coded
           fi
           cargo xtask build
       - uses: actions/upload-artifact@v4
@@ -54,6 +62,10 @@ jobs:
             build/knixx-web-ble.uf2
             build/knixx-web-ble.hex
             build/knixx-web-ble-dfu.zip
+            build/knixx-web-ble-coded.elf
+            build/knixx-web-ble-coded.uf2
+            build/knixx-web-ble-coded.hex
+            build/knixx-web-ble-coded-dfu.zip
 
   bolt:
     strategy:

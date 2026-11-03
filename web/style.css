@@ -9,10 +9,14 @@
   --off: #e7e7e3;
   --none: #f2dede;
   --accent: #1a73e8;
+  --on-accent: #ffffff;
+  color-scheme: light;
 }
 
+/* Dark: the system's choice, unless the theme button picked light; or the
+   button's choice. */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --bg: #161615;
     --fg: #ececea;
     --muted: #9a9a94;
@@ -23,7 +27,25 @@
     --off: #2c2c29;
     --none: #4a2b2b;
     --accent: #8ab4f8;
+  --on-accent: #0d1a2d;
+    --on-accent: #0d1a2d;
+    color-scheme: dark;
   }
+}
+
+:root[data-theme="dark"] {
+  --bg: #161615;
+  --fg: #ececea;
+  --muted: #9a9a94;
+  --card: #20201f;
+  --line: #34342f;
+  --on: #f4b400;
+  --on-fg: #241a00;
+  --off: #2c2c29;
+  --none: #4a2b2b;
+  --accent: #8ab4f8;
+  --on-accent: #0d1a2d;
+  color-scheme: dark;
 }
 
 * {
@@ -82,16 +104,30 @@ button:disabled {
 button.primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
 }
 
 /* At the right of the header: the value, then the bars, on one bottom
    line. */
+/* The right of the header: the signal, while connected, and the theme
+   button. */
+.corner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-left: auto;
+}
+
+button.theme {
+  padding: 4px 9px;
+  font-size: 16px;
+  line-height: 1;
+}
+
 .signal {
   display: inline-flex;
   align-items: flex-end;
   gap: 6px;
-  margin-left: auto;
   color: var(--muted);
   font-size: 13px;
   font-variant-numeric: tabular-nums;

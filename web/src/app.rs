@@ -15,6 +15,7 @@ use knixx_knx::tp1::Priority;
 use knixx_knx::{GroupAddress, IndividualAddress};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
+use wasm_bindgen::JsCast;
 
 use crate::ble::{self, Board, Note};
 
@@ -35,6 +36,85 @@ const LOG_LINES: usize = 100;
 const KEY_SWITCH: &str = "knixx.switch";
 const KEY_STATUS: &str = "knixx.status";
 const KEY_COUNT: &str = "knixx.count";
+const KEY_THEME: &str = "knixx.theme";
+
+/// The theme colours of the browser's bar, as in style.css and index.html.
+const LIGHT_BAR: &str = "#f6f6f4";
+const DARK_BAR: &str = "#161615";
+
+/// The theme the theme button picks: auto follows the system.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Theme {
+    Auto,
+    Light,
+    Dark,
+}
+
+impl Theme {
+    fn load() -> Theme {
+        match load(KEY_THEME).as_deref() {
+            Some("light") => Theme::Light,
+            Some("dark") => Theme::Dark,
+            _ => Theme::Auto,
+        }
+    }
+
+    fn next(self) -> Theme {
+        match self {
+            Theme::Auto => Theme::Light,
+            Theme::Light => Theme::Dark,
+            Theme::Dark => Theme::Auto,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Theme::Auto => "auto",
+            Theme::Light => "light",
+            Theme::Dark => "dark",
+        }
+    }
+
+    fn symbol(self) -> &'static str {
+        match self {
+            Theme::Auto => "◐",
+            Theme::Light => "☀",
+            Theme::Dark => "☾",
+        }
+    }
+
+    /// Applies the theme to the page, as index.html does at load, and keeps
+    /// it: style.css follows the root's data-theme, and the browser's bar
+    /// its theme-color.
+    fn apply(self) {
+        save(KEY_THEME, self.name());
+        let Some(doc) = web_sys::window().and_then(|w| w.document()) else {
+            return;
+        };
+        if let Some(root) = doc.document_element() {
+            let _ = match self {
+                Theme::Auto => root.remove_attribute("data-theme"),
+                _ => root.set_attribute("data-theme", self.name()),
+            };
+        }
+        let Ok(metas) = doc.query_selector_all("meta[name=\"theme-color\"]") else {
+            return;
+        };
+        for i in 0..metas.length() {
+            let Some(m) = metas.item(i).and_then(|n| n.dyn_into::<web_sys::Element>().ok()) else {
+                continue;
+            };
+            let color = match self {
+                Theme::Light => LIGHT_BAR,
+                Theme::Dark => DARK_BAR,
+                // Each tag's own: the light one, then the dark one.
+                Theme::Auto if m.get_attribute("media").is_some_and(|q| q.contains("dark")) => DARK_BAR,
+                Theme::Auto => LIGHT_BAR,
+            };
+            let _ = m.set_attribute("content", color);
+        }
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum State {
@@ -336,7 +416,10 @@ pub fn App() -> impl IntoView {
             <button class="primary" on:click=connect disabled=move || c.busy.get()>
                 {move || if c.connected.get() { "Disconnect" } else { "Connect" }}
             </button>
-            <Signal c />
+            <div class="corner">
+                <Signal c />
+                <ThemeButton />
+            </div>
             <p class="status">{move || c.status.get()}</p>
         </header>
         <main>
@@ -344,6 +427,27 @@ pub fn App() -> impl IntoView {
             <Panel c />
             <Log c />
         </main>
+    }
+}
+
+/// The theme button: auto, light, dark, in turn.
+#[component]
+fn ThemeButton() -> impl IntoView {
+    let theme = RwSignal::new(Theme::load());
+    let click = move |_| {
+        let t = theme.get_untracked().next();
+        t.apply();
+        theme.set(t);
+    };
+    view! {
+        <button
+            class="theme"
+            on:click=click
+            title=move || format!("theme: {} (tap for the next)", theme.get().name())
+            aria-label=move || format!("theme: {}", theme.get().name())
+        >
+            {move || theme.get().symbol()}
+        </button>
     }
 }
 

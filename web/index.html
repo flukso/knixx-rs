@@ -7,6 +7,19 @@
     <meta name="description" content="Switch the lights of a KNX installation through a knixx board, over Bluetooth.">
     <meta name="theme-color" content="#f6f6f4" media="(prefers-color-scheme: light)">
     <meta name="theme-color" content="#161615" media="(prefers-color-scheme: dark)">
+    <script>
+      // The theme the theme button picked, before the page draws: auto
+      // follows the system. See Theme in src/app.rs.
+      try {
+        const t = localStorage.getItem("knixx.theme");
+        if (t === "light" || t === "dark") {
+          document.documentElement.dataset.theme = t;
+          for (const m of document.querySelectorAll('meta[name="theme-color"]')) {
+            m.content = t === "dark" ? "#161615" : "#f6f6f4";
+          }
+        }
+      } catch (e) {}
+    </script>
     <link rel="manifest" href="manifest.webmanifest">
     <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
     <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">

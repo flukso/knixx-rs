@@ -761,6 +761,9 @@ localhost.
 - **Signal**, at the top right: the strength of the link as the board
   receives it, in dBm, with bars, every 2 s. Below about -85 dBm the link
   gets unreliable.
+- **Theme**, the button at the top right: ◐ follows the light or dark mode
+  of the system, ☀ keeps the app light and ☾ dark. The browser remembers
+  the choice.
 
 The app sends from the board's individual address, as a script does: the
 board sends group value writes, reads and responses only, with the same

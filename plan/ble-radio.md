@@ -8,8 +8,9 @@
 > with one), and advertising failures are now said on the console. Tested
 > on the board with a Mac: TX power live (-20 to +8 dBm moved the Mac's
 > RSSI by 25 dB), 2M and 251 B packets, `ble link`, and 1M through extended
-> advertising with the coded set on. Reception on coded is still to be
-> checked with an Android phone (nRF Connect).
+> advertising with the coded set on. On coded, an Android phone with nRF
+> Connect connected through the coded set and got coded S8 on both tx and
+> rx.
 
 ## Context
 

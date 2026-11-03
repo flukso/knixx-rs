@@ -78,6 +78,34 @@ impl fmt::Display for Dpt1018 {
     }
 }
 
+/// Dpt5001 represents DPT 5.001 / DPT_Scaling: a percentage from 0 to 100,
+/// carried as a byte from 0 to 255.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Dpt5001(pub u8);
+
+impl Dpt5001 {
+    /// Packs the percentage, clamped to 100, as a telegram's data: the APCI
+    /// octet and the value octet, rounded to the nearest step.
+    pub fn pack(self) -> [u8; 2] {
+        let p = self.0.min(100) as u32;
+        [0, ((p * 255 + 50) / 100) as u8]
+    }
+
+    /// Unpacks the percentage, rounded to the nearest whole one.
+    pub fn unpack(data: &[u8]) -> Result<Self, Error> {
+        match data {
+            [_, v] => Ok(Self(((*v as u32 * 100 + 127) / 255) as u8)),
+            _ => Err(Error::InvalidLength),
+        }
+    }
+}
+
+impl fmt::Display for Dpt5001 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} %", self.0)
+    }
+}
+
 /// The DPT 9 bounds, in hundredths.
 const MIN_F16: i32 = -67_108_864;
 const MAX_F16: i32 = 67_076_096;
@@ -121,6 +149,24 @@ pub fn f16_unpack(data: &[u8]) -> Option<i32> {
 mod tests {
     use super::*;
     use std::string::ToString;
+
+    #[test]
+    fn dpt5001() {
+        for (p, v) in [(0, 0x00), (1, 0x03), (50, 0x80), (99, 0xfc), (100, 0xff)] {
+            assert_eq!(Dpt5001(p).pack(), [0, v], "{p} %");
+            assert_eq!(Dpt5001::unpack(&[0, v]), Ok(Dpt5001(p)), "{v:#x}");
+        }
+        assert_eq!(Dpt5001(150).pack(), [0, 0xff]);
+        // Every byte unpacks to a percentage that packs back to it or a
+        // neighbour.
+        for v in 0..=255u8 {
+            let p = Dpt5001::unpack(&[0, v]).unwrap();
+            assert!(p.0 <= 100);
+            assert!(Dpt5001(p.0).pack()[1].abs_diff(v) <= 2, "{v}");
+        }
+        assert_eq!(Dpt5001::unpack(&[0]), Err(Error::InvalidLength));
+        assert_eq!(Dpt5001(42).to_string(), "42 %");
+    }
 
     #[test]
     fn dpt_1001() {

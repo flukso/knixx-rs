@@ -1,0 +1,223 @@
+:root {
+  --bg: #f6f6f4;
+  --fg: #1d1d1b;
+  --muted: #6b6b66;
+  --card: #ffffff;
+  --line: #deded9;
+  --on: #f4b400;
+  --on-fg: #3a2a00;
+  --off: #e7e7e3;
+  --none: #f2dede;
+  --accent: #1a73e8;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161615;
+    --fg: #ececea;
+    --muted: #9a9a94;
+    --card: #20201f;
+    --line: #34342f;
+    --on: #f4b400;
+    --on-fg: #241a00;
+    --off: #2c2c29;
+    --none: #4a2b2b;
+    --accent: #8ab4f8;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0 auto;
+  max-width: 960px;
+  padding: 16px;
+  background: var(--bg);
+  color: var(--fg);
+  font: 15px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  margin-bottom: 16px;
+}
+
+h1 {
+  margin: 0;
+  font-size: 22px;
+}
+
+h2 {
+  margin: 0 0 8px;
+  font-size: 15px;
+  color: var(--muted);
+}
+
+.status {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--muted);
+}
+
+button {
+  font: inherit;
+  padding: 6px 14px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--card);
+  color: var(--fg);
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+/* At the right of the header: the value, then the bars, on one bottom
+   line. */
+.signal {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 6px;
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.signal .value {
+  line-height: 1;
+}
+
+.bars {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 2px;
+}
+
+.bar {
+  width: 4px;
+  border-radius: 1px;
+  background: var(--line);
+}
+
+.bar.lit {
+  background: var(--accent);
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.light {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 12px 4px;
+  border-radius: 10px;
+  background: var(--off);
+}
+
+.light .ga {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.light .state {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.light.on {
+  background: var(--on);
+  border-color: var(--on);
+  color: var(--on-fg);
+}
+
+.light.on .state {
+  color: var(--on-fg);
+}
+
+.light.unknown {
+  background: var(--card);
+}
+
+.light.none {
+  background: var(--none);
+}
+
+details {
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--card);
+}
+
+summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin-top: 10px;
+}
+
+label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+input,
+select {
+  font: inherit;
+  padding: 4px 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+input[type="number"] {
+  width: 5em;
+}
+
+.hint {
+  margin: 10px 0 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.log ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font: 13px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+.log li {
+  padding: 2px 0;
+  border-bottom: 1px solid var(--line);
+  overflow-wrap: anywhere;
+}

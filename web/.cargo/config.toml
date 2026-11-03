@@ -1,0 +1,6 @@
+[build]
+target = "wasm32-unknown-unknown"
+
+# web-sys keeps the Web Bluetooth API behind this cfg.
+[target.wasm32-unknown-unknown]
+rustflags = ["--cfg=web_sys_unstable_apis"]

@@ -6,3 +6,5 @@
 /cad/.venv/
 # the boards' 3D models, which are not published
 /pcb/*.step
+/web/target/
+/web/dist/

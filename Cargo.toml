@@ -1,10 +1,10 @@
 # The host workspace: the shared no_std crates (tested on the host), the host
 # tools and xtask. The firmware is a workspace of its own in firmware/, built
-# for the nRF52840.
+# for the nRF52840, and so is the web app in web/, built for wasm32.
 [workspace]
 resolver = "3"
 members = ["crates/*", "host/knixx-host", "host/bolt", "host/knixx-shell", "xtask"]
-exclude = ["firmware"]
+exclude = ["firmware", "web"]
 
 [workspace.package]
 edition = "2024"

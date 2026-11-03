@@ -53,6 +53,8 @@ tasks:
           into build/cad/ [--step <model.step>, $PY]
   cycle   build, then flash <n> times; after each flash the board must
           report its version over USB and advertise as knixx over BLE
+  web     serve the web app on localhost with trunk, rebuilt on changes;
+          --build only builds it into web/dist/ [trunk flags]
 ";
 
 /// The firmware features a build takes from its flags.
@@ -102,6 +104,7 @@ fn main() -> Result<()> {
             a.extend_from_slice(&rest);
             bolt(&a)
         }
+        Some("web") => web(&rest),
         Some("term") => {
             let mut a = vec!["term".to_string()];
             a.extend_from_slice(&args[1..]);
@@ -406,6 +409,28 @@ fn hex_bytes(s: &str) -> Vec<u8> {
 
 /// Runs bolt with args in the repository root. bolt is built on its own,
 /// with BLE, which xtask does without.
+/// Serves the web app with trunk, or builds it with --build. The cargo of
+/// web/rust-toolchain.toml builds it: CARGO and RUSTUP_TOOLCHAIN, set for
+/// xtask, are left out.
+fn web(args: &[String]) -> Result<()> {
+    let (cmd, rest) = match args.split_first() {
+        Some((b, rest)) if b == "--build" => (["build", "--release"].as_slice(), rest),
+        _ => (["serve", "--open"].as_slice(), args),
+    };
+    let status = Command::new("trunk")
+        .args(cmd)
+        .args(rest)
+        .current_dir(root().join("web"))
+        .env_remove("CARGO")
+        .env_remove("RUSTUP_TOOLCHAIN")
+        .status()
+        .context("run trunk (install it: cargo install trunk --locked, or brew install trunk)")?;
+    if !status.success() {
+        bail!("trunk {} failed", cmd[0]);
+    }
+    Ok(())
+}
+
 fn bolt(args: &[String]) -> Result<()> {
     let status = Command::new(env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
         .args(["run", "--quiet", "--package", "bolt", "--"])

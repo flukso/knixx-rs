@@ -13,10 +13,14 @@ allow = [
     "MPL-2.0",
 ]
 confidence-threshold = 0.9
-# CC0-1.0 is a public-domain dedication, fine next to MIT. Allowed per crate
-# rather than globally: tiny-keccak comes in via rhai -> ahash -> const-random.
+# Permissive licenses of single crates, allowed per crate rather than
+# globally. CC0-1.0 is a public-domain dedication: tiny-keccak comes in via
+# rhai -> ahash -> const-random, base16 via the web app's leptos. BSL-1.0, the
+# Boost license: xxhash-rust, via leptos too.
 exceptions = [
     { crate = "tiny-keccak", allow = ["CC0-1.0"] },
+    { crate = "base16", allow = ["CC0-1.0"] },
+    { crate = "xxhash-rust", allow = ["BSL-1.0"] },
 ]
 
 [bans]

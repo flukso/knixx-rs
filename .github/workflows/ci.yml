@@ -58,3 +58,15 @@ jobs:
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check licenses
+      - name: Web app
+        # Its own workspace, for wasm32 (web/rust-toolchain.toml).
+        run: |
+          cd web
+          rustup show
+          cargo clippy -- -D warnings
+          cargo fmt --check
+      - name: Web app licenses
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses
+          manifest-path: ./web/Cargo.toml

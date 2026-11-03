@@ -1,0 +1,45 @@
+# The web app: group control of the KNX bus through a knixx board, over Web
+# Bluetooth and the board's knixx GATT service. A workspace of its own, for
+# wasm32, built with trunk (cargo xtask web).
+[workspace]
+
+[package]
+name = "knixx-web"
+version = "0.1.0"
+description = "Web app for knixx boards over Web Bluetooth"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/flukso/knixx-rs"
+
+[dependencies]
+knixx-knx = { path = "../crates/knixx-knx" }
+leptos = { version = "=0.8.22", features = ["csr"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+futures = "0.3"
+gloo-timers = { version = "0.3", features = ["futures"] }
+console_error_panic_hook = "0.1"
+
+[dependencies.web-sys]
+version = "0.3"
+features = [
+    "Bluetooth",
+    "BluetoothDevice",
+    "BluetoothLeScanFilterInit",
+    "BluetoothRemoteGattCharacteristic",
+    "BluetoothRemoteGattServer",
+    "BluetoothRemoteGattService",
+    "Event",
+    "EventTarget",
+    "Navigator",
+    "RequestDeviceOptions",
+    "Storage",
+    "Window",
+]
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"

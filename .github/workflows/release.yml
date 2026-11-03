@@ -31,8 +31,17 @@ jobs:
       - name: flip-link
         run: cargo install flip-link --locked
       - name: Build
-        # build/knixx.{elf,uf2,hex} and build/knixx-dfu.zip
-        run: cargo xtask build
+        # build/knixx.{elf,uf2,hex} and build/knixx-dfu.zip; the web-ble
+        # build, with the knixx GATT service for the web app, as
+        # knixx-web-ble.*, for the tags that have the feature.
+        run: |
+          if grep -q '^web-ble' firmware/knixx-fw/Cargo.toml; then
+            cargo xtask build --web-ble
+            for f in knixx.elf knixx.uf2 knixx.hex knixx-dfu.zip; do
+              mv build/$f build/${f/knixx/knixx-web-ble}
+            done
+          fi
+          cargo xtask build
       - uses: actions/upload-artifact@v4
         with:
           name: firmware
@@ -41,6 +50,10 @@ jobs:
             build/knixx.uf2
             build/knixx.hex
             build/knixx-dfu.zip
+            build/knixx-web-ble.elf
+            build/knixx-web-ble.uf2
+            build/knixx-web-ble.hex
+            build/knixx-web-ble-dfu.zip
 
   bolt:
     strategy:

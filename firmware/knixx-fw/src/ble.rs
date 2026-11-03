@@ -34,6 +34,8 @@ use nrf_sdc::{self as sdc, SoftdeviceController};
 use static_cell::StaticCell;
 use trouble_host::prelude::*;
 
+#[cfg(feature = "web-ble")]
+use crate::knixx_gatt;
 use crate::{bonds, console, nus};
 
 /// Outgoing and incoming L2CAP buffers per link.
@@ -71,9 +73,17 @@ struct Db {
 
 static DB: OnceLock<Db> = OnceLock::new();
 
+#[cfg(not(feature = "web-ble"))]
 #[gatt_server(attribute_table_size = ATTRIBUTES)]
 struct Server {
     nus: NusService,
+}
+
+#[cfg(feature = "web-ble")]
+#[gatt_server(attribute_table_size = ATTRIBUTES)]
+struct Server {
+    nus: NusService,
+    knixx: knixx_gatt::KnixxService,
 }
 
 /// The Nordic UART Service: the central writes RX and is notified on TX.
@@ -182,7 +192,8 @@ async fn ble_task(sdc: SoftdeviceController<'static>) -> ! {
     panic!("ble: the host runner stopped");
 }
 
-/// Advertises while NUS is on and serves one central at a time.
+/// Advertises while NUS is on, or all the time while the knixx service is
+/// (ble.knixx, with the web-ble feature), and serves one central at a time.
 async fn serve(
     stack: &'static Stack,
     peripheral: &mut Peripheral<'static, SoftdeviceController<'static>, DefaultPacketPool>,
@@ -199,7 +210,7 @@ async fn serve(
     // Whether the console asked for NUS: the last CONTROL.
     let mut nus_on = false;
     loop {
-        if !nus_on {
+        if !nus_on && !knixx_on() {
             match select(nus::CONTROL.wait(), bonds::CHANGED.wait()).await {
                 Either::First(c) => {
                     nus_on = c;
@@ -247,6 +258,8 @@ async fn serve(
             // The central's OS pairs, or encrypts with its bond, at once.
             let _ = conn.raw().request_security();
         }
+        #[cfg(feature = "web-ble")]
+        knixx_gatt::reset();
         let mut first = true;
         loop {
             let params = async {
@@ -265,12 +278,21 @@ async fn serve(
             };
             // The sender watches for nus on and off between notifications, so
             // that none is cut off halfway.
-            let ctl = match select(join(params, events(stack, server, &conn)), send(server, &conn)).await {
-                Either::Second(Some(on)) => on,
+            let ctl = match select3(
+                join(params, events(stack, server, &conn)),
+                send(server, &conn),
+                knixx(stack, server, &conn),
+            )
+            .await
+            {
+                Either3::Second(Some(on)) => on,
                 _ => break,
             };
             if ctl {
-                // The console asks for nus on only while NUS is off.
+                // nus on while a central of the knixx service is connected: it
+                // may bond now.
+                nus_on = true;
+                let _ = conn.raw().set_bondable(true);
                 continue;
             }
             // nus off: let the queued output, such as the reply to nus off,
@@ -283,6 +305,12 @@ async fn serve(
                 }
             }
             nus::OUT.lock(|q| q.borrow_mut().reset());
+            // A bonded central of the knixx service stays; the pairing window
+            // is closed.
+            if knixx_on() && allowed(&conn) {
+                nus::OFF_DONE.signal(());
+                continue;
+            }
             conn.raw().disconnect();
             let _ = with_timeout(FLUSH_TIMEOUT, async {
                 while !matches!(conn.next().await, GattConnectionEvent::Disconnected { .. }) {}
@@ -297,19 +325,36 @@ async fn serve(
     }
 }
 
-/// Fills the advertising data, and the scan response, which stays empty,
-/// and returns their lengths.
-fn advertising(adv: &mut [u8; 31], _scan: &mut [u8; 31]) -> (usize, usize) {
+/// Fills the advertising data and the scan response, and returns their
+/// lengths. With the knixx service, its UUID is advertised, for the web
+/// app's filter, and the NUS UUID moves to the scan response: two 128-bit
+/// UUIDs and the name do not fit one packet.
+fn advertising(adv: &mut [u8; 31], scan: &mut [u8; 31]) -> (usize, usize) {
+    #[cfg(feature = "web-ble")]
+    let (main, extra) = (knixx_gatt::SERVICE_UUID_LE, Some(NUS_UUID_LE));
+    #[cfg(not(feature = "web-ble"))]
+    let (main, extra) = (NUS_UUID_LE, None::<[u8; 16]>);
     let len = AdStructure::encode_slice(
         &[
             AdStructure::Flags(LE_GENERAL_DISCOVERABLE | BR_EDR_NOT_SUPPORTED),
-            AdStructure::CompleteServiceUuids128(&[NUS_UUID_LE]),
+            AdStructure::CompleteServiceUuids128(&[main]),
             AdStructure::CompleteLocalName(nus::NAME.as_bytes()),
         ],
         adv,
     )
     .expect("advertising data");
-    (len, 0)
+    let scan_len = match extra {
+        Some(u) => AdStructure::encode_slice(&[AdStructure::CompleteServiceUuids128(&[u])], scan)
+            .expect("scan response"),
+        None => 0,
+    };
+    (len, scan_len)
+}
+
+/// Whether the knixx service keeps the board advertising: ble.knixx, in a
+/// firmware built with web-ble.
+fn knixx_on() -> bool {
+    cfg!(feature = "web-ble") && console::device().ble.knixx
 }
 
 /// Whether ble.pair is on.
@@ -432,10 +477,49 @@ pub fn service_changed() -> &'static str {
     }
 }
 
-/// The handles that need a paired central: those of NUS.
+/// The handles that need a paired central: those of NUS and of the knixx
+/// service.
 fn guarded(server: &Server, handle: u16) -> bool {
     let nus = &server.nus;
-    handle == nus.rx.handle || handle == nus.tx.handle || Some(handle) == nus.tx.cccd_handle
+    if handle == nus.rx.handle || handle == nus.tx.handle || Some(handle) == nus.tx.cccd_handle {
+        return true;
+    }
+    #[cfg(feature = "web-ble")]
+    {
+        let k = &server.knixx;
+        if handle == k.send.handle
+            || handle == k.rssi.handle
+            || [k.result.cccd_handle, k.group.cccd_handle, k.rssi.cccd_handle].contains(&Some(handle))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Serves the knixx service's notifications, the link's RSSI included,
+/// until the central is gone; it never returns without the web-ble feature.
+async fn knixx(stack: &'static Stack, server: &'static Server<'static>, conn: &Conn) {
+    #[cfg(feature = "web-ble")]
+    {
+        let rssi = async {
+            loop {
+                Timer::after(knixx_gatt::RSSI_PERIOD).await;
+                if !nus::connected() {
+                    continue;
+                }
+                if let Ok(v) = conn.raw().rssi(stack).await {
+                    let _ = server.knixx.rssi.notify(conn, &v, true).await;
+                }
+            }
+        };
+        select(knixx_gatt::serve(&server.knixx, conn), rssi).await;
+    }
+    #[cfg(not(feature = "web-ble"))]
+    {
+        let _ = (stack, server, conn);
+        core::future::pending::<()>().await;
+    }
 }
 
 /// The handle a GATT request is for.
@@ -492,6 +576,12 @@ async fn events(stack: &'static Stack, server: &'static Server<'static>, conn: &
                 {
                     w.with_data(|_, data| nus::RX.lock(|r| r.borrow_mut().put(data)));
                     nus::RX_READY.signal(());
+                }
+                #[cfg(feature = "web-ble")]
+                if let GattEvent::Write(w) = &event
+                    && w.handle() == server.knixx.send.handle
+                {
+                    w.with_data(|_, data| knixx_gatt::write(data));
                 }
                 if let Ok(reply) = event.accept() {
                     reply.send().await;

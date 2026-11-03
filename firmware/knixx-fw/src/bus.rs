@@ -52,9 +52,16 @@ impl Output for Console {
         leds::signal(Mode::Error);
     }
 
-    #[cfg(feature = "scripts")]
-    fn telegram(&mut self, tg: &knixx_knx::tp1::Telegram, own: bool) {
-        crate::runner::telegram(tg, own);
+    fn telegram(&mut self, _tg: &knixx_knx::tp1::Telegram, _own: bool) {
+        #[cfg(feature = "scripts")]
+        crate::runner::telegram(_tg, _own);
+        #[cfg(feature = "web-ble")]
+        crate::knixx_gatt::telegram(_tg, _own);
+    }
+
+    #[cfg(feature = "web-ble")]
+    fn sent(&mut self, tag: knixx_bus::Tag, status: knixx_bus::Status) {
+        crate::knixx_gatt::sent(tag, status);
     }
 }
 

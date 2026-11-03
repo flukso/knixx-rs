@@ -52,6 +52,12 @@ pub trait Ctx {
     fn flags(&self) -> &Flags;
     /// Persists a configuration file.
     fn save(&mut self, data: &[u8]) -> Result<(), Self::SaveError>;
+    /// Refuses a configuration that config set made, with why: one that
+    /// asks for what the caller lacks, such as a feature it was built
+    /// without.
+    fn check(&self, _dev: &Device) -> Result<(), &'static str> {
+        Ok(())
+    }
 }
 
 /// What the caller does after a command.
@@ -207,6 +213,10 @@ fn config_set<C: Ctx>(ctx: &mut C, key: &str, values: &[&str], w: &mut dyn Write
     let mut dev = ctx.device();
     if let Err(err) = config::set(&mut dev, key, value) {
         let _ = writeln!(w, "{err}");
+        return;
+    }
+    if let Err(why) = ctx.check(&dev) {
+        let _ = writeln!(w, "config: {key}: {why}");
         return;
     }
     // The device is only replaced once the engine takes it, which leaves it

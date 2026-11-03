@@ -37,11 +37,13 @@ const USAGE: &str = "usage: cargo xtask <task>
 tasks:
   build   build the firmware and write build/knixx.{elf,uf2,hex} and the
           DFU package build/knixx-dfu.zip [--no-scripts: without Rhai
-          Grain and its heap, so that no allocator is linked]
+          Grain and its heap, so that no allocator is linked] [--web-ble:
+          with the knixx GATT service for the web app]
   flash   build, flash over USB and check the board runs the build
-          [--port <serial port>]
+          [--port <serial port>] [--no-scripts] [--web-ble]
   ota     build, then send build/knixx-dfu.zip over BLE to a board in BLE
-          DFU mode (run ota on its console) [bolt ota flags, e.g. --addr]
+          DFU mode (run ota on its console) [--no-scripts] [--web-ble]
+          [bolt ota flags, e.g. --addr]
   term    a terminal on the console, over USB or BLE [bolt term flags]
   golden  record crates/knixx-vl53l7cx/testdata/configure.golden with ST's
           C driver and the harness; --check only compares [$CC, default cc]
@@ -53,26 +55,51 @@ tasks:
           report its version over USB and advertise as knixx over BLE
 ";
 
+/// The firmware features a build takes from its flags.
+#[derive(Clone, Copy)]
+struct Features {
+    scripts: bool,
+    web_ble: bool,
+}
+
+impl Features {
+    /// Takes --no-scripts and --web-ble out of args.
+    fn take(args: &[String]) -> (Features, Vec<String>) {
+        let mut f = Features {
+            scripts: true,
+            web_ble: false,
+        };
+        let mut rest = Vec::new();
+        for a in args {
+            match a.as_str() {
+                "--no-scripts" => f.scripts = false,
+                "--web-ble" => f.web_ble = true,
+                _ => rest.push(a.clone()),
+            }
+        }
+        (f, rest)
+    }
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
+    let (features, rest) = Features::take(args.get(1..).unwrap_or(&[]));
     match args.first().map(String::as_str) {
         Some("build") => {
-            let scripts = match &args[1..] {
-                [] => true,
-                [flag] if flag == "--no-scripts" => false,
-                _ => bail!("usage: cargo xtask build [--no-scripts]"),
-            };
-            build_with(scripts).map(|_| ())
+            if !rest.is_empty() {
+                bail!("usage: cargo xtask build [--no-scripts] [--web-ble]");
+            }
+            build_with(features).map(|_| ())
         }
-        Some("flash") => flash(&args[1..]),
-        Some("cycle") => cycle(&args[1..]),
+        Some("flash") => flash(features, &rest),
+        Some("cycle") => cycle(features, &rest),
         Some("golden") => golden(&args[1..]),
         Some("genfw") => genfw(&args[1..]),
         Some("cad") => cad::run(&args[1..]),
         Some("ota") => {
-            build()?;
+            build_with(features)?;
             let mut a = vec!["ota".to_string(), "--zip".into(), "build/knixx-dfu.zip".into()];
-            a.extend_from_slice(&args[1..]);
+            a.extend_from_slice(&rest);
             bolt(&a)
         }
         Some("term") => {
@@ -128,21 +155,20 @@ impl Version {
     }
 }
 
-/// Builds the firmware, with scripts.
-fn build() -> Result<(PathBuf, Version)> {
-    build_with(true)
-}
-
 /// Builds the firmware and writes build/knixx.elf, .uf2 and .hex. It fails
 /// when the image does not fit the application's flash, and on the heap
 /// rule: with scripts the allocator is the heap of Rhai Grain; without
 /// them no allocator may be linked.
-fn build_with(scripts: bool) -> Result<(PathBuf, Version)> {
+fn build_with(f: Features) -> Result<(PathBuf, Version)> {
+    let scripts = f.scripts;
     let v = Version::now();
     let mut cargo = Command::new(env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
     cargo.args(["build", "--release"]);
     if !scripts {
         cargo.arg("--no-default-features");
+    }
+    if f.web_ble {
+        cargo.args(["--features", "web-ble"]);
     }
     let status = cargo
         .current_dir(root().join("firmware"))
@@ -395,13 +421,13 @@ fn bolt(args: &[String]) -> Result<()> {
 
 /// Builds the firmware and flashes it over USB, then checks that the board
 /// reports the new version.
-fn flash(args: &[String]) -> Result<()> {
+fn flash(features: Features, args: &[String]) -> Result<()> {
     let port = match args {
         [] => None,
         [flag, p] if flag == "--port" => Some(p.clone()),
         _ => bail!("usage: cargo xtask flash [--port <serial port>]"),
     };
-    let (uf2, v) = build()?;
+    let (uf2, v) = build_with(features)?;
     flash::uf2(flash::Options {
         file: &uf2,
         port,
@@ -416,12 +442,12 @@ fn flash(args: &[String]) -> Result<()> {
 /// report the version over USB and advertise over BLE: every flash ends in
 /// the bootloader jumping to the application without a reset, the path on
 /// which USB and the BLE controller can hang (nrf-sdc issue #103).
-fn cycle(args: &[String]) -> Result<()> {
+fn cycle(features: Features, args: &[String]) -> Result<()> {
     let n: u32 = match args {
         [n] => n.parse().context("cycle count")?,
         _ => bail!("usage: cargo xtask cycle <n>"),
     };
-    let (uf2, v) = build()?;
+    let (uf2, v) = build_with(features)?;
     let expect = format!("version {} built {}", v.commit, v.date);
     for i in 1..=n {
         eprintln!("--- cycle {i} of {n}");

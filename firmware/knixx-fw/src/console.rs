@@ -187,6 +187,13 @@ impl knixx_cli::Ctx for Ctx {
     fn save(&mut self, data: &[u8]) -> Result<(), storage::SaveError> {
         storage::save(data)
     }
+
+    fn check(&self, dev: &Device) -> Result<(), &'static str> {
+        if dev.ble.knixx && !cfg!(feature = "web-ble") {
+            return Err("the knixx service is not built in (cargo xtask build --web-ble)");
+        }
+        Ok(())
+    }
 }
 
 const fn commands() -> [Cmd<Ctx>; knixx_cli::NUM_SHARED + 8] {
@@ -338,9 +345,21 @@ fn nus_cmd(_: &mut Ctx, args: &[&str], w: &mut dyn Write) -> Action {
 fn ble_cmd(_: &mut Ctx, args: &[&str], w: &mut dyn Write) -> Action {
     match args {
         [] => {
-            let pair = if device().ble.pair { "on" } else { "off" };
+            let ble = device().ble;
+            let on_off = |b: bool| if b { "on" } else { "off" };
+            let knixx = if !cfg!(feature = "web-ble") {
+                "not built in"
+            } else {
+                on_off(ble.knixx)
+            };
             let list = bonds::list();
-            let _ = writeln!(w, "ble: pairing {pair}, {} of {} bonds", list.len(), bonds::MAX);
+            let _ = writeln!(
+                w,
+                "ble: pairing {}, knixx service {knixx}, {} of {} bonds",
+                on_off(ble.pair),
+                list.len(),
+                bonds::MAX
+            );
             for b in &list {
                 let _ = writeln!(w, "  {b}");
             }

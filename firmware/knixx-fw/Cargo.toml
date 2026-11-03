@@ -37,3 +37,6 @@ default = ["scripts"]
 # Scripts in Rhai Grain, with the heap that only they use. Without it the
 # firmware links no allocator.
 scripts = ["dep:rlsf", "dep:knixx-script"]
+# The knixx GATT service, for a web app on Web Bluetooth: group value writes,
+# reads and responses through the board, and the group telegrams on the bus.
+web-ble = []

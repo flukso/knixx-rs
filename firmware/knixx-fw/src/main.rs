@@ -22,6 +22,8 @@ mod console;
 #[cfg(feature = "scripts")]
 mod heap;
 mod i2c;
+#[cfg(feature = "web-ble")]
+mod knixx_gatt;
 mod leds;
 mod nus;
 mod panic;

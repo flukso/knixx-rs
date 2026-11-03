@@ -14,6 +14,8 @@ struct Fake {
     cap: usize,
     saved: Option<Vec<u8>>,
     err: Option<&'static str>,
+    /// What check refuses a device with ble.knixx on with.
+    no_knixx: Option<&'static str>,
 }
 
 impl Fake {
@@ -25,6 +27,7 @@ impl Fake {
             cap,
             saved: None,
             err: None,
+            no_knixx: None,
         }
     }
 
@@ -68,6 +71,13 @@ impl Ctx for Fake {
         }
         self.saved = Some(data.to_vec());
         Ok(())
+    }
+
+    fn check(&self, dev: &Device) -> Result<(), &'static str> {
+        match self.no_knixx {
+            Some(why) if dev.ble.knixx => Err(why),
+            _ => Ok(()),
+        }
     }
 }
 
@@ -386,4 +396,25 @@ fn split_long_line() {
     assert_eq!(split_fields(&long, &mut fields), MAX_FIELDS);
     assert_eq!(fields[MAX_FIELDS - 2], "x");
     assert_eq!(fields[MAX_FIELDS - 1], "x x x");
+}
+
+/// A configuration that Ctx::check refuses is neither applied nor saved.
+#[test]
+fn config_set_checked() {
+    let mut f = Fake::new(two_switches(0x1101), 4);
+    f.no_knixx = Some("not built in");
+    assert_eq!(
+        f.out("config set ble.knixx on"),
+        "config: ble.knixx: not built in\n"
+    );
+    assert!(!f.dev.ble.knixx);
+    assert!(f.queue.is_empty());
+    assert!(f.saved.is_none());
+    // Other keys are set as ever.
+    assert_eq!(f.out("config set ble.pair off"), "ble.pair = off (saved)\n");
+    assert!(!f.dev.ble.pair);
+
+    f.no_knixx = None;
+    assert_eq!(f.out("config set ble.knixx on"), "ble.knixx = on (saved)\n");
+    assert!(f.dev.ble.knixx);
 }

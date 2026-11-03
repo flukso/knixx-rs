@@ -90,6 +90,25 @@ pub async fn connect(note: impl Fn(Note) + Clone + 'static) -> Result<Board, Str
     let device: BluetoothDevice = call("no board chosen", bt.request_device(&opts)).await?;
     let server = device.gatt().ok_or("the board has no GATT server")?;
     let server: BluetoothRemoteGattServer = call("connect", server.connect()).await?;
+    match setup(device, &server, note).await {
+        // The board drops a central that is not paired, outside its pairing
+        // window: the browser's error then only says the link is gone.
+        Err(_) if !server.connected() => Err(DROPPED.into()),
+        r => r,
+    }
+}
+
+/// What the app says when the board dropped the link while it was set up.
+const DROPPED: &str = "The board dropped the connection. If this device isn't paired with the board yet, \
+    open the board's pairing window and connect again.";
+
+/// Gets the service of a connected board and subscribes to its
+/// notifications.
+async fn setup(
+    device: BluetoothDevice,
+    server: &BluetoothRemoteGattServer,
+    note: impl Fn(Note) + Clone + 'static,
+) -> Result<Board, String> {
     let svc: BluetoothRemoteGattService =
         call("the knixx service", server.get_primary_service_with_str(SERVICE)).await?;
     let ch = |uuid: &'static str| {

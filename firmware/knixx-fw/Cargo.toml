@@ -40,3 +40,5 @@ scripts = ["dep:rlsf", "dep:knixx-script"]
 # The knixx GATT service, for a web app on Web Bluetooth: group value writes,
 # reads and responses through the board, and the group telegrams on the bus.
 web-ble = []
+# Long-range advertising and connections on the LE Coded PHY, next to 1M.
+coded-phy = []

@@ -134,13 +134,24 @@ pub struct Ble {
     /// to send and receive group telegrams; a firmware built without it
     /// ignores it.
     pub knixx: bool,
+    /// tx_power is the radio's transmit power in dBm, one of TX_POWERS, for
+    /// advertising and connections.
+    pub tx_power: i8,
+    /// coded adds advertising on the LE Coded PHY (long range) to that on
+    /// 1M; a firmware built without coded PHY ignores it.
+    pub coded: bool,
 }
+
+/// TX_POWERS lists the nRF52840's transmit power levels in dBm.
+pub const TX_POWERS: [i8; 14] = [-40, -20, -16, -12, -8, -4, 0, 2, 3, 4, 5, 6, 7, 8];
 
 impl Ble {
     /// DEFAULT is the setting of a configuration without the section.
     pub const DEFAULT: Ble = Ble {
         pair: true,
         knixx: false,
+        tx_power: 0,
+        coded: false,
     };
 }
 

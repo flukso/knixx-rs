@@ -25,6 +25,7 @@ mod i2c;
 #[cfg(feature = "web-ble")]
 mod knixx_gatt;
 mod leds;
+mod link;
 mod nus;
 mod panic;
 #[cfg(feature = "scripts")]

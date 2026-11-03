@@ -6,7 +6,7 @@ use core::fmt::{self, Write};
 use knixx_knx::address::{GroupAddressError, IndividualAddressError};
 use knixx_knx::{GroupAddress, IndividualAddress};
 
-use crate::thunder::{self, Ble, Device, MAX_GROUPS, NUM_SWITCHES, Occupancy, Switch};
+use crate::thunder::{self, Ble, Device, MAX_GROUPS, NUM_SWITCHES, Occupancy, Switch, TX_POWERS};
 
 const DEVICE_SECTION: &str = "device";
 const INDIVIDUAL_KEY: &str = "individual";
@@ -24,6 +24,8 @@ const MAX_DISTANCE_KEY: &str = "max_distance";
 const BLE_SECTION: &str = "ble";
 const PAIR_KEY: &str = "pair";
 const KNIXX_KEY: &str = "knixx";
+const TX_POWER_KEY: &str = "tx_power";
+const CODED_KEY: &str = "coded";
 const ON: &str = "on";
 const OFF: &str = "off";
 /// UNBOUND is the value of an optional group address that is not set.
@@ -43,7 +45,7 @@ pub const MAX_VALUE: usize = MAX_GROUPS * "31/7/255".len() + (MAX_GROUPS - 1) * 
 pub const DEFAULT: &[u8] = include_bytes!("../default.ini");
 
 /// KEYS lists the parameters accessible through get and set, in file order.
-pub const KEYS: [&str; 15] = [
+pub const KEYS: [&str; 17] = [
     "device.individual",
     "A.group",
     "B.group",
@@ -59,6 +61,8 @@ pub const KEYS: [&str; 15] = [
     "occupancy.max_distance",
     "ble.pair",
     "ble.knixx",
+    "ble.tx_power",
+    "ble.coded",
 ];
 
 /// Store persists a configuration produced by format.
@@ -137,6 +141,11 @@ pub enum ValueError<'a> {
     },
     /// "<quoted value> is not on or off"
     OnOff(&'a str),
+    /// "<quoted value> is not one of <allowed>"
+    Choice {
+        value: &'a str,
+        allowed: &'static [i8],
+    },
 }
 
 impl fmt::Display for ValueError<'_> {
@@ -155,6 +164,17 @@ impl fmt::Display for ValueError<'_> {
             Self::OnOff(value) => {
                 write_quoted(f, value)?;
                 f.write_str(" is not on or off")
+            }
+            Self::Choice { value, allowed } => {
+                write_quoted(f, value)?;
+                f.write_str(" is not one of ")?;
+                for (i, a) in allowed.iter().enumerate() {
+                    if i > 0 {
+                        f.write_str(", ")?;
+                    }
+                    write!(f, "{a}")?;
+                }
+                Ok(())
             }
         }
     }
@@ -401,10 +421,12 @@ enum Field {
     MaxDistance,
     Pair,
     Knixx,
+    TxPower,
+    Coded,
 }
 
 /// FIELDS maps the "section.key" names of all but the switches' values.
-const FIELDS: [(&str, &str, Field); 13] = [
+const FIELDS: [(&str, &str, Field); 15] = [
     (DEVICE_SECTION, INDIVIDUAL_KEY, Field::Individual),
     (TEMPERATURE_SECTION, GROUP_KEY, Field::Temperature),
     (HUMIDITY_SECTION, GROUP_KEY, Field::Humidity),
@@ -418,6 +440,8 @@ const FIELDS: [(&str, &str, Field); 13] = [
     (OCCUPANCY_SECTION, MAX_DISTANCE_KEY, Field::MaxDistance),
     (BLE_SECTION, PAIR_KEY, Field::Pair),
     (BLE_SECTION, KNIXX_KEY, Field::Knixx),
+    (BLE_SECTION, TX_POWER_KEY, Field::TxPower),
+    (BLE_SECTION, CODED_KEY, Field::Coded),
 ];
 
 /// Slot points at the value a field refers to.
@@ -434,6 +458,11 @@ enum Slot<'d> {
     },
     /// "on" or "off".
     Flag(&'d mut bool),
+    /// A signed number from a fixed list.
+    Choice {
+        n: &'d mut i8,
+        allowed: &'static [i8],
+    },
 }
 
 impl Field {
@@ -492,6 +521,11 @@ impl Field {
             },
             Field::Pair => Slot::Flag(&mut dev.ble.pair),
             Field::Knixx => Slot::Flag(&mut dev.ble.knixx),
+            Field::TxPower => Slot::Choice {
+                n: &mut dev.ble.tx_power,
+                allowed: &TX_POWERS,
+            },
+            Field::Coded => Slot::Flag(&mut dev.ble.coded),
         }
     }
 }
@@ -521,6 +555,13 @@ impl Slot<'_> {
                 }
                 None => Err(ValueError::OnOff(value)),
             },
+            Slot::Choice { n, allowed } => match value.trim().parse::<i8>() {
+                Ok(v) if allowed.contains(&v) => {
+                    *n = v;
+                    Ok(())
+                }
+                _ => Err(ValueError::Choice { value, allowed }),
+            },
         }
     }
 
@@ -532,6 +573,7 @@ impl Slot<'_> {
             Slot::Group(g) => write_optional_group(w, **g),
             Slot::Number { n, .. } => write!(w, "{}", **n),
             Slot::Flag(b) => w.write_str(on_off(**b)),
+            Slot::Choice { n, .. } => write!(w, "{}", **n),
         }
     }
 }
@@ -605,7 +647,8 @@ pub fn get<'a>(dev: &Device, key: &'a str) -> Result<Value, Error<'a>> {
 /// comma separated list; temperature.group, humidity.group,
 /// illuminance.group and occupancy.group take a single group address, or
 /// "-" to unbind it; the other occupancy keys take a number within their
-/// range; ble.pair and ble.knixx take on or off; the distance window is not checked as a pair, see
+/// range; ble.pair, ble.knixx and ble.coded take on or off, ble.tx_power one
+/// of TX_POWERS; the distance window is not checked as a pair, see
 /// Occupancy::distance_valid. dev is left untouched when value is invalid.
 pub fn set<'a>(dev: &mut Device, key: &'a str, value: &'a str) -> Result<(), Error<'a>> {
     let field = Field::resolve(dev, key)?;
@@ -684,9 +727,11 @@ fn write_ini(w: &mut impl Write, dev: &Device) -> fmt::Result {
     }
     write!(
         w,
-        "\n[{BLE_SECTION}]\n{PAIR_KEY} = {}\n{KNIXX_KEY} = {}\n",
+        "\n[{BLE_SECTION}]\n{PAIR_KEY} = {}\n{KNIXX_KEY} = {}\n{TX_POWER_KEY} = {}\n{CODED_KEY} = {}\n",
         on_off(dev.ble.pair),
-        on_off(dev.ble.knixx)
+        on_off(dev.ble.knixx),
+        dev.ble.tx_power,
+        on_off(dev.ble.coded)
     )?;
     Ok(())
 }

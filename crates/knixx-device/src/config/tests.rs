@@ -4,7 +4,7 @@ use std::string::ToString;
 use std::vec::Vec;
 
 /// BLE is the ble section as format writes it for Ble::DEFAULT.
-const BLE: &str = "\n[ble]\npair = on\nknixx = off\n";
+const BLE: &str = "\n[ble]\npair = on\nknixx = off\ntx_power = 0\ncoded = off\n";
 
 fn fmt(dev: &Device) -> std::string::String {
     let mut buf = [0; MAX_FILE];
@@ -485,11 +485,13 @@ fn format_fits() {
         ble: Ble {
             pair: false,
             knixx: false,
+            tx_power: 0,
+            coded: false,
         },
     };
     let text = fmt(&dev);
     assert!(
-        text.ends_with("max_distance = 65535\n\n[ble]\npair = off\nknixx = off\n"),
+        text.ends_with("max_distance = 65535\n\n[ble]\npair = off\nknixx = off\ntx_power = 0\ncoded = off\n"),
         "{text}"
     );
     assert_eq!(get(&dev, "A.group").unwrap().len(), MAX_VALUE);
@@ -501,7 +503,7 @@ fn ble() {
     let dev = parse(b"[device]\nindividual = 1.1.1\n[A]\ngroup = 0/0/1\n[B]\ngroup = 0/0/2\n").unwrap();
     assert_eq!(dev.ble, Ble::DEFAULT);
     assert!(dev.ble.pair && !dev.ble.knixx);
-    assert!(fmt(&dev).ends_with("\n[ble]\npair = on\nknixx = off\n"));
+    assert!(fmt(&dev).ends_with(BLE));
 
     // A missing key keeps its default.
     let dev =
@@ -510,8 +512,8 @@ fn ble() {
     assert_eq!(
         dev.ble,
         Ble {
-            pair: true,
-            knixx: true
+            knixx: true,
+            ..Ble::DEFAULT
         }
     );
     round_trip(&dev);
@@ -535,4 +537,37 @@ fn ble() {
         parse(b"[device]\nindividual = 1.1.1\n[A]\ngroup = 0/0/1\n[B]\ngroup = 0/0/2\n[ble]\npair = 1\n")
             .unwrap_err();
     assert_eq!(err.to_string(), "config: [ble] pair: \"1\" is not on or off");
+}
+
+#[test]
+fn ble_radio() {
+    let mut dev = parse(DEFAULT).unwrap();
+    assert_eq!((dev.ble.tx_power, dev.ble.coded), (0, false));
+    for (value, want) in [("8", 8), (" -40 ", -40), ("-4", -4), ("0", 0), ("2", 2)] {
+        set(&mut dev, "ble.tx_power", value).unwrap();
+        assert_eq!(dev.ble.tx_power, want, "{value:?}");
+        assert_eq!(get(&dev, "ble.tx_power").unwrap(), want.to_string().as_str());
+    }
+    set(&mut dev, "ble.tx_power", "-8").unwrap();
+    set(&mut dev, "ble.coded", "on").unwrap();
+    assert!(dev.ble.coded);
+    round_trip(&dev);
+    assert!(fmt(&dev).ends_with("tx_power = -8\ncoded = on\n"));
+
+    let before = dev;
+    for value in ["9", "1", "-41", "max", ""] {
+        assert!(set(&mut dev, "ble.tx_power", value).is_err(), "{value:?}");
+    }
+    assert_eq!(dev, before);
+    let err = set(&mut dev, "ble.tx_power", "1").unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "config: ble.tx_power: \"1\" is not one of -40, -20, -16, -12, -8, -4, 0, 2, 3, 4, 5, 6, 7, 8"
+    );
+
+    // Without the keys: the defaults.
+    let dev =
+        parse(b"[device]\nindividual = 1.1.1\n[A]\ngroup = 0/0/1\n[B]\ngroup = 0/0/2\n[ble]\npair = off\n")
+            .unwrap();
+    assert_eq!((dev.ble.tx_power, dev.ble.coded), (0, false));
 }

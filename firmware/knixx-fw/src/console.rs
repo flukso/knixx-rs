@@ -26,7 +26,8 @@ use knixx_ui::switches::HOLD_TIME;
 
 use knixx_console::upload::{Event, Upload};
 
-use crate::{bonds, boot, leds, nus, panic, script, storage, usbcdc};
+use crate::link::Uptime;
+use crate::{bonds, boot, leds, link, nus, panic, script, storage, usbcdc};
 
 const PROMPT: &str = ">>> ";
 
@@ -192,6 +193,9 @@ impl knixx_cli::Ctx for Ctx {
         if dev.ble.knixx && !cfg!(feature = "web-ble") {
             return Err("the knixx service is not built in (cargo xtask build --web-ble)");
         }
+        if dev.ble.coded && !cfg!(feature = "coded-phy") {
+            return Err("coded PHY is not built in (cargo xtask build --coded-phy)");
+        }
         Ok(())
     }
 }
@@ -220,7 +224,7 @@ const fn commands() -> [Cmd<Ctx>; knixx_cli::NUM_SHARED + 8] {
         },
         Cmd {
             name: "ble",
-            help: "ble | ble forget all|<address>: show the pairing setting and the bonded centrals, or forget them",
+            help: "ble | ble link | ble forget all|<address>: show the BLE settings and the bonded centrals, the active connection, or forget bonds",
             run: ble_cmd,
         },
         Cmd {
@@ -288,6 +292,12 @@ fn sys(_: &mut Ctx, args: &[&str], w: &mut dyn Write) -> Action {
         );
     }
     let _ = writeln!(w, "usb dtr    {}", usbcdc::DTR.load(Ordering::Relaxed));
+    let _ = writeln!(
+        w,
+        "ble mem    {} of {} bytes for the controller",
+        crate::ble::MEM_NEEDED.load(Ordering::Relaxed),
+        crate::ble::SDC_MEM
+    );
     Action::None
 }
 
@@ -363,8 +373,22 @@ fn ble_cmd(_: &mut Ctx, args: &[&str], w: &mut dyn Write) -> Action {
             for b in &list {
                 let _ = writeln!(w, "  {b}");
             }
+            let coded = if !cfg!(feature = "coded-phy") {
+                "not built in"
+            } else {
+                on_off(ble.coded)
+            };
+            let _ = writeln!(w, "ble: tx power {} dBm, coded {coded}", ble.tx_power);
             let _ = writeln!(w, "ble: last link: {}", crate::ble::service_changed());
         }
+        ["link"] => match link::get() {
+            Some(l) => {
+                let _ = write!(w, "{l}");
+            }
+            None => {
+                let _ = writeln!(w, "ble link: no central connected");
+            }
+        },
         ["forget", which] => {
             let (n, saved) = if which.eq_ignore_ascii_case("all") {
                 bonds::forget(|_| true)
@@ -387,7 +411,7 @@ fn ble_cmd(_: &mut Ctx, args: &[&str], w: &mut dyn Write) -> Action {
             }
         }
         _ => {
-            let _ = writeln!(w, "usage: ble [forget all|<address>]");
+            let _ = writeln!(w, "usage: ble [link | forget all|<address>]");
         }
     }
     Action::None
@@ -396,23 +420,6 @@ fn ble_cmd(_: &mut Ctx, args: &[&str], w: &mut dyn Write) -> Action {
 fn ota(_: &mut Ctx, _: &[&str], w: &mut dyn Write) -> Action {
     let _ = writeln!(w, "rebooting into the bootloader for a BLE firmware update");
     Action::Reboot(boot::OTA)
-}
-
-/// A duration in seconds, formatted as Go's time.Duration: 45s, 1m0s,
-/// 2h26m30s.
-struct Uptime(u64);
-
-impl fmt::Display for Uptime {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let (h, m, s) = (self.0 / 3600, self.0 / 60 % 60, self.0 % 60);
-        if h > 0 {
-            write!(f, "{h}h{m}m{s}s")
-        } else if m > 0 {
-            write!(f, "{m}m{s}s")
-        } else {
-            write!(f, "{s}s")
-        }
-    }
 }
 
 /// The console task's state.

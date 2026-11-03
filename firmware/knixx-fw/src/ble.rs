@@ -19,7 +19,7 @@
 //! that ble.pair can change without a reboot.
 
 use core::fmt::Write;
-use core::sync::atomic::{AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
@@ -30,20 +30,32 @@ use embassy_sync::once_lock::OnceLock;
 use embassy_time::{Duration, Instant, Timer, with_timeout};
 use knixx_console::nus as framing;
 use nrf_mpsl::MultiprotocolServiceLayer;
-use nrf_sdc::{self as sdc, SoftdeviceController};
+use nrf_sdc::{self as sdc, SoftdeviceController, vendor};
 use static_cell::StaticCell;
 use trouble_host::prelude::*;
 
 #[cfg(feature = "web-ble")]
 use crate::knixx_gatt;
-use crate::{bonds, console, nus};
+use crate::{bonds, console, link, nus};
 
 /// Outgoing and incoming L2CAP buffers per link.
 const L2CAP_TXQ: u8 = 3;
 const L2CAP_RXQ: u8 = 3;
 
-/// The memory of the SoftDevice Controller for its configuration below.
-const SDC_MEM: usize = 4720;
+/// The memory of the SoftDevice Controller for its configuration below; sys
+/// shows what the controller needs of it.
+pub const SDC_MEM: usize = 2880;
+
+/// The memory the controller needs for its configuration, for sys.
+pub static MEM_NEEDED: AtomicUsize = AtomicUsize::new(0);
+
+/// The TX power handle types of Nordic's vendor command.
+const TX_POWER_ADV: u8 = 0;
+const TX_POWER_CONN: u8 = 2;
+
+/// The link-layer payload and air time the board asks for: the largest.
+const DATA_LENGTH: u16 = 251;
+const DATA_TIME: u16 = 2120;
 
 /// How long nus off waits for the queued output to reach the central.
 const FLUSH_TIMEOUT: Duration = Duration::from_secs(1);
@@ -120,8 +132,17 @@ pub fn start(
     mpsl: &'static MultiprotocolServiceLayer<'static>,
 ) {
     static MEM: StaticCell<sdc::Mem<SDC_MEM>> = StaticCell::new();
-    let sdc = sdc::Builder::new()
-        .and_then(|b| b.support_adv().support_peripheral().peripheral_count(1))
+    // 2M and larger link-layer packets for speed, the PHY update the
+    // central asks for, and the TX power of ble.tx_power.
+    let builder = sdc::Builder::new()
+        .and_then(|b| {
+            b.support_adv()
+                .support_peripheral()
+                .support_le_2m_phy()
+                .support_phy_update_peripheral()
+                .support_dle_peripheral()
+                .peripheral_count(1)
+        })
         .and_then(|b| {
             b.buffer_cfg(
                 DefaultPacketPool::MTU as u16,
@@ -130,8 +151,13 @@ pub fn start(
                 L2CAP_RXQ,
             )
         })
-        .and_then(|b| b.build(p, rng, mpsl, MEM.init(sdc::Mem::new())))
+        .and_then(|b| b.default_tx_power(console::device().ble.tx_power))
         .expect("nrf-sdc");
+    let need = builder.required_memory().expect("nrf-sdc");
+    MEM_NEEDED.store(need, Ordering::Relaxed);
+    let sdc = builder
+        .build(p, rng, mpsl, MEM.init(sdc::Mem::new()))
+        .expect("nrf-sdc: SDC_MEM too small, see sys");
     spawner.spawn(ble_task(sdc).unwrap());
 }
 
@@ -222,6 +248,7 @@ async fn serve(
             }
             continue;
         }
+        set_tx_power(stack, TX_POWER_ADV, 0).await;
         let accept = async {
             let advertiser = peripheral
                 .advertise(&AdvertisementParameters::default(), adv)
@@ -249,6 +276,15 @@ async fn serve(
         };
 
         nus::OUT.lock(|q| q.borrow_mut().reset());
+        let p = conn.raw().params();
+        let mut peer = [0; 6];
+        peer.copy_from_slice(conn.raw().peer_address().addr.raw());
+        link::set(Some(link::Link::new(
+            peer,
+            p.conn_interval,
+            p.peripheral_latency,
+            p.supervision_timeout,
+        )));
         // Bonding is offered only in the pairing window; a pairing outside
         // it gives no bond, and the link is dropped.
         let _ = conn.raw().set_bondable(console::pairing_window());
@@ -275,13 +311,22 @@ async fn serve(
                 if let Err(e) = conn.raw().update_connection_params(stack, &params).await {
                     let _ = writeln!(crate::console::Out, "nus: connection interval: {e:?}");
                 }
+                // Larger link-layer packets, when the central has them too.
+                let _ = conn.raw().update_data_length(stack, DATA_LENGTH, DATA_TIME).await;
+                set_tx_power(stack, TX_POWER_CONN, conn.raw().handle().raw()).await;
+                if let Ok((tx, rx)) = conn.raw().read_phy(stack).await {
+                    link::update(|l| (l.tx_phy, l.rx_phy) = (tx, rx));
+                }
             };
             // The sender watches for nus on and off between notifications, so
             // that none is cut off halfway.
             let ctl = match select3(
-                join(params, events(stack, server, &conn)),
+                join(
+                    params,
+                    select(events(stack, server, &conn), watch(stack, server, &conn)),
+                ),
                 send(server, &conn),
-                knixx(stack, server, &conn),
+                knixx(server, &conn),
             )
             .await
             {
@@ -322,6 +367,54 @@ async fn serve(
         }
         nus::CONNECTED.store(false, Ordering::Relaxed);
         nus::OUT.lock(|q| q.borrow_mut().reset());
+        link::set(None);
+    }
+}
+
+/// Sets the TX power of ble.tx_power for the advertising (handle type
+/// TX_POWER_ADV, its handle is ignored for legacy advertising) or a
+/// connection (TX_POWER_CONN and its handle), on the fly.
+async fn set_tx_power(stack: &Stack, handle_type: u8, handle: u16) {
+    let dbm = console::device().ble.tx_power;
+    let cmd = vendor::ZephyrWriteTxPower::new(vendor::ZephyrWriteTxPowerParams {
+        handle_type,
+        handle,
+        tx_power_level: dbm,
+    });
+    let set = stack.command(cmd).await;
+    if handle_type == TX_POWER_CONN
+        && let Ok(r) = set
+    {
+        link::update(|l| l.tx_power = Some(r.selected_tx_power));
+    }
+}
+
+/// Reads the RSSI and the TX power of the link every link::READ_PERIOD into
+/// the link record, and with web-ble notifies the knixx service's rssi. It
+/// never returns: the central's disconnection ends it.
+async fn watch(stack: &'static Stack, server: &'static Server<'static>, conn: &Conn) {
+    let _ = server;
+    loop {
+        Timer::after(link::READ_PERIOD).await;
+        let raw = conn.raw();
+        let rssi = raw.rssi(stack).await.ok();
+        let cmd = vendor::ZephyrReadTxPower::new(vendor::ZephyrReadTxPowerParams {
+            handle_type: TX_POWER_CONN,
+            handle: raw.handle().raw(),
+        });
+        let power = stack.command(cmd).await.ok().map(|r| r.selected_tx_power);
+        let mtu = raw.att_mtu();
+        link::update(|l| {
+            l.rssi = rssi.or(l.rssi);
+            l.tx_power = power.or(l.tx_power);
+            l.mtu = mtu;
+        });
+        #[cfg(feature = "web-ble")]
+        if let Some(v) = rssi
+            && nus::connected()
+        {
+            let _ = server.knixx.rssi.notify(conn, &v, true).await;
+        }
     }
 }
 
@@ -355,6 +448,23 @@ fn advertising(adv: &mut [u8; 31], scan: &mut [u8; 31]) -> (usize, usize) {
 /// firmware built with web-ble.
 fn knixx_on() -> bool {
     cfg!(feature = "web-ble") && console::device().ble.knixx
+}
+
+/// Records the link's security, and the central's identity address once it
+/// is bonded.
+fn note_security(conn: &Conn) {
+    let raw = conn.raw();
+    let encrypted = raw.security_level().is_ok_and(|l| l.encrypted());
+    let bonded = raw.is_bonded_peer();
+    let mut id = [0; 6];
+    id.copy_from_slice(raw.peer_identity().addr.addr.raw());
+    link::update(|l| {
+        l.encrypted = encrypted;
+        l.bonded = bonded;
+        if bonded {
+            l.addr = id;
+        }
+    });
 }
 
 /// Whether ble.pair is on.
@@ -497,27 +607,15 @@ fn guarded(server: &Server, handle: u16) -> bool {
     false
 }
 
-/// Serves the knixx service's notifications, the link's RSSI included,
-/// until the central is gone; it never returns without the web-ble feature.
-async fn knixx(stack: &'static Stack, server: &'static Server<'static>, conn: &Conn) {
+/// Serves the knixx service's notifications until the central is gone (the
+/// link's RSSI goes out from watch); it never returns without the web-ble
+/// feature.
+async fn knixx(server: &'static Server<'static>, conn: &Conn) {
     #[cfg(feature = "web-ble")]
-    {
-        let rssi = async {
-            loop {
-                Timer::after(knixx_gatt::RSSI_PERIOD).await;
-                if !nus::connected() {
-                    continue;
-                }
-                if let Ok(v) = conn.raw().rssi(stack).await {
-                    let _ = server.knixx.rssi.notify(conn, &v, true).await;
-                }
-            }
-        };
-        select(knixx_gatt::serve(&server.knixx, conn), rssi).await;
-    }
+    knixx_gatt::serve(&server.knixx, conn).await;
     #[cfg(not(feature = "web-ble"))]
     {
-        let _ = (stack, server, conn);
+        let _ = (server, conn);
         core::future::pending::<()>().await;
     }
 }
@@ -541,11 +639,34 @@ async fn events(stack: &'static Stack, server: &'static Server<'static>, conn: &
             Either::Second(()) => {
                 sync_bonds(stack);
                 admit(conn);
+                // ble.tx_power may have changed.
+                set_tx_power(stack, TX_POWER_CONN, conn.raw().handle().raw()).await;
                 continue;
             }
         };
         match event {
             GattConnectionEvent::Disconnected { .. } => return,
+            GattConnectionEvent::ConnectionParamsUpdated {
+                conn_interval,
+                peripheral_latency,
+                supervision_timeout,
+            } => link::update(|l| {
+                l.interval = conn_interval;
+                l.latency = peripheral_latency;
+                l.timeout = supervision_timeout;
+            }),
+            GattConnectionEvent::PhyUpdated { tx_phy, rx_phy } => {
+                link::update(|l| (l.tx_phy, l.rx_phy) = (tx_phy, rx_phy))
+            }
+            GattConnectionEvent::DataLengthUpdated {
+                max_tx_octets,
+                max_tx_time,
+                max_rx_octets,
+                max_rx_time,
+            } => link::update(|l| {
+                (l.tx_octets, l.tx_time) = (max_tx_octets, max_tx_time);
+                (l.rx_octets, l.rx_time) = (max_rx_octets, max_rx_time);
+            }),
             GattConnectionEvent::PairingComplete { bond, .. } => {
                 if let Some(info) = bond {
                     if console::pairing_window() {
@@ -555,8 +676,10 @@ async fn events(stack: &'static Stack, server: &'static Server<'static>, conn: &
                     }
                 }
                 admit(conn);
+                note_security(conn);
             }
             GattConnectionEvent::Encrypted { .. } => {
+                note_security(conn);
                 if admit(conn) {
                     services_changed(server, conn).await;
                 }

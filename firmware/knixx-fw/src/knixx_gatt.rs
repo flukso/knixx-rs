@@ -3,7 +3,7 @@
 //! is notified of their outcome and of the group value telegrams on the bus.
 //! The values are those of knixx_knx::gatt. The rssi characteristic
 //! carries the signal strength of the link as the board receives it, in dBm,
-//! every RSSI_PERIOD: a browser cannot read it of a connected device. While
+//! every link::READ_PERIOD: a browser cannot read it of a connected device. While
 //! ble.pair is on, only a paired central gets in, as for NUS (see ble).
 
 use embassy_futures::select::{Either, select};
@@ -21,9 +21,6 @@ use crate::{console, nus};
 pub const SERVICE_UUID_LE: [u8; 16] = [
     0x10, 0x7a, 0x8c, 0x9d, 0x5b, 0x3e, 0xf0, 0xa2, 0x8e, 0x4c, 0x5d, 0x1b, 0x01, 0x78, 0x6e, 0x6b,
 ];
-
-/// How often the central is told the link's RSSI.
-pub const RSSI_PERIOD: embassy_time::Duration = embassy_time::Duration::from_secs(2);
 
 /// The knixx service: the central writes send and is notified on result,
 /// group and rssi.

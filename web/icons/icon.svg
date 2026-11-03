@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- knixx lights: a light bulb on a rounded square -->
+  <rect width="512" height="512" rx="112" fill="#1d1d1b"/>
+  <g transform="translate(256 262) scale(0.78) translate(-256 -262)">
+    <!-- rays -->
+    <g stroke="#f4b400" stroke-width="22" stroke-linecap="round">
+      <line x1="256" y1="18" x2="256" y2="58"/>
+      <line x1="88" y1="88" x2="116" y2="116"/>
+      <line x1="424" y1="88" x2="396" y2="116"/>
+      <line x1="18" y1="236" x2="58" y2="236"/>
+      <line x1="494" y1="236" x2="454" y2="236"/>
+    </g>
+    <!-- glass -->
+    <path fill="#f4b400" d="M256 92C176 92 116 152 116 230c0 50 26 88 58 114 16 13 24 30 24 50v6h116v-6c0-20 8-37 24-50 32-26 58-64 58-114 0-78-60-138-140-138z"/>
+    <!-- shine -->
+    <path fill="none" stroke="#fff3c4" stroke-width="18" stroke-linecap="round" d="M178 214c4-36 30-64 64-72"/>
+    <!-- base -->
+    <g fill="#c9ccd1">
+      <rect x="196" y="416" width="120" height="22" rx="11"/>
+      <rect x="196" y="446" width="120" height="22" rx="11"/>
+      <path d="M220 476h72c0 18-16 30-36 30s-36-12-36-30z"/>
+    </g>
+  </g>
+</svg>

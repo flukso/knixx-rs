@@ -4,8 +4,23 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>knixx lights</title>
+    <meta name="description" content="Switch the lights of a KNX installation through a knixx board, over Bluetooth.">
+    <meta name="theme-color" content="#f6f6f4" media="(prefers-color-scheme: light)">
+    <meta name="theme-color" content="#161615" media="(prefers-color-scheme: dark)">
+    <link rel="manifest" href="manifest.webmanifest">
+    <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+    <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+    <link data-trunk rel="copy-file" href="manifest.webmanifest">
+    <link data-trunk rel="copy-file" href="sw.js">
+    <link data-trunk rel="copy-dir" href="icons">
     <link data-trunk rel="css" href="style.css">
     <link data-trunk rel="rust" data-wasm-opt="z">
+    <script>
+      // The service worker keeps the app for offline use, see sw.js.
+      if ("serviceWorker" in navigator) {
+        addEventListener("load", () => navigator.serviceWorker.register("sw.js"));
+      }
+    </script>
   </head>
   <body></body>
 </html>

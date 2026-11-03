@@ -707,6 +707,15 @@ It is served at **https://flukso.github.io/knixx-rs/**, from
 `.github/workflows/pages.yml` on every push to `main` that changes it, and
 `cargo xtask web` serves it on localhost while working on it.
 
+Chrome can **install** it, as an app of its own with an icon (the bulb of
+`web/icons/`, drawn in `icon.svg` and `maskable.svg`): *Install app* in
+Chrome's menu, or the install button in the address bar on a computer.
+`web/manifest.webmanifest` describes the app, and the service worker in
+`web/sw.js` keeps its files, so that it also starts without a network: it
+reaches the board over Bluetooth only. Online, every start fetches the
+current app. Installing needs HTTPS, which GitHub Pages gives, or
+localhost.
+
 ### Setting up the board
 
 1. Flash the firmware with the knixx GATT service: `cargo xtask flash

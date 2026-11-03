@@ -19,7 +19,7 @@
 //! that ble.pair can change without a reboot.
 
 use core::fmt::Write;
-use core::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
@@ -392,6 +392,7 @@ async fn serve(
                 // Larger link-layer packets, when the central has them too.
                 let _ = conn.raw().update_data_length(stack, DATA_LENGTH, DATA_TIME).await;
                 set_tx_power(stack, TX_POWER_CONN, conn.raw().handle().raw()).await;
+                request_phy(stack, &conn).await;
                 if let Ok((tx, rx)) = conn.raw().read_phy(stack).await {
                     link::update(|l| (l.tx_phy, l.rx_phy) = (tx, rx));
                 }
@@ -467,6 +468,33 @@ async fn set_tx_power(stack: &Stack, handle_type: u8, handle: u16) {
     }
 }
 
+/// Whether the board asked the connected central for coded, and has not yet
+/// fallen back to 1M on its refusal.
+static ASKED_CODED: AtomicBool = AtomicBool::new(false);
+
+/// Asks the central for the PHY of ble.coded: coded S8 while it is on, for
+/// range, else 2M, for speed. A central without coded refuses it, and the
+/// board then asks for 1M, the PHY with the next best range, rather than
+/// leave it on 2M if the central moved there (see fall_back); ble link
+/// shows what the central accepted.
+async fn request_phy(stack: &Stack, conn: &Conn) {
+    let coded = cfg!(feature = "coded-phy") && console::device().ble.coded;
+    ASKED_CODED.store(coded, Ordering::Relaxed);
+    let phy = if coded { PhyKind::LeCoded } else { PhyKind::Le2M };
+    let _ = conn.raw().set_phy(stack, phy).await;
+}
+
+/// When the link is not on the coded PHY the board asked for, the central
+/// refused it: asks for 1M instead, once, for range. A refusal may come without a PHY
+/// update event (the controller knows the central's PHYs), so watch checks
+/// the link's PHY too.
+async fn fall_back(stack: &Stack, conn: &Conn, tx: PhyKind) {
+    let coded = matches!(tx, PhyKind::LeCoded | PhyKind::LeCodedS2);
+    if !coded && ASKED_CODED.swap(false, Ordering::Relaxed) {
+        let _ = conn.raw().set_phy(stack, PhyKind::Le1M).await;
+    }
+}
+
 /// Reads the RSSI and the TX power of the link every link::READ_PERIOD into
 /// the link record, and with web-ble notifies the knixx service's rssi. It
 /// never returns: the central's disconnection ends it.
@@ -482,6 +510,12 @@ async fn watch(stack: &'static Stack, server: &'static Server<'static>, conn: &C
         });
         let power = stack.command(cmd).await.ok().map(|r| r.selected_tx_power);
         let mtu = raw.att_mtu();
+        if ASKED_CODED.load(Ordering::Relaxed)
+            && let Ok((tx, rx)) = raw.read_phy(stack).await
+        {
+            link::update(|l| (l.tx_phy, l.rx_phy) = (tx, rx));
+            fall_back(stack, conn, tx).await;
+        }
         link::update(|l| {
             l.rssi = rssi.or(l.rssi);
             l.tx_power = power.or(l.tx_power);
@@ -757,8 +791,9 @@ async fn events(stack: &'static Stack, server: &'static Server<'static>, conn: &
             Either::Second(()) => {
                 sync_bonds(stack);
                 admit(conn);
-                // ble.tx_power may have changed.
+                // ble.tx_power or ble.coded may have changed.
                 set_tx_power(stack, TX_POWER_CONN, conn.raw().handle().raw()).await;
+                request_phy(stack, conn).await;
                 continue;
             }
         };
@@ -774,7 +809,8 @@ async fn events(stack: &'static Stack, server: &'static Server<'static>, conn: &
                 l.timeout = supervision_timeout;
             }),
             GattConnectionEvent::PhyUpdated { tx_phy, rx_phy } => {
-                link::update(|l| (l.tx_phy, l.rx_phy) = (tx_phy, rx_phy))
+                link::update(|l| (l.tx_phy, l.rx_phy) = (tx_phy, rx_phy));
+                fall_back(stack, conn, tx_phy).await;
             }
             GattConnectionEvent::DataLengthUpdated {
                 max_tx_octets,

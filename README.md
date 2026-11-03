@@ -477,10 +477,21 @@ set ble.tx_power 8` applies at once, without a reconnect: 8 dBm reach about
 2.5 times as far as 0 dBm in free space, for more current in each radio
 event, and -20 dBm keeps the board to the room it is in.
 
-**PHYs and packets.** Every build takes the PHY a central asks for, 1M or
-2M, and link-layer packets of up to 251 bytes instead of 27, which the
-board asks for on connecting: a Mac then runs at 2M with 251-byte packets.
-Uploads over BLE go faster.
+**PHYs and packets.** On connecting, and again when `ble.coded` changes,
+the board asks the central for a PHY:
+
+| `ble.coded` | the board asks for | a central without that PHY |
+|---|---|---|
+| `off` | 2M, for speed | stays on 1M |
+| `on` | coded S8, for range | is moved to 1M, the PHY with the next best range |
+
+So Chrome on Android, which connects on 1M, moves to 2M, or to coded with
+`ble.coded` on; a Mac moves to 2M, or stays on 1M with `ble.coded` on. 2M
+costs some range: its receiver needs about 3 dB more signal than 1M (about
+-92 against -95 dBm on the nRF52840), roughly 70% of the distance, where
+coded S8 gets by with 8 dB less (-103 dBm). The board also asks for
+link-layer packets of up to 251 bytes instead of 27, so uploads over BLE go
+faster.
 
 **Coded PHY: long range.** The LE Coded PHY sends each bit as 8 symbols
 (S8, 125 kbps): about 4 times the range of 1M at the same TX power, at an
@@ -491,10 +502,11 @@ on`. The board then advertises twice:
 - on 1M as ever, so that every phone and computer finds it, and
 - on coded, for a central that scans the coded PHY.
 
-A central that connects on the coded set gets a coded link; `ble link`
-shows it. Android phones with Bluetooth 5 do coded (nRF Connect scans and
-connects on it); iPhones, Macs and Chrome's Web Bluetooth do not, and keep
-using 1M. A connection on 1M can also move to coded when the central asks.
+A central that connects on the coded set gets a coded link, and one that
+connects on 1M is asked to move to coded; `ble link` shows the result.
+Android phones with Bluetooth 5 do coded (nRF Connect scans and connects on
+it, and Chrome's connections move to it); iPhones and Macs do not, and stay
+on 1M.
 
 **`ble link`** shows the active connection, as the board sees it:
 

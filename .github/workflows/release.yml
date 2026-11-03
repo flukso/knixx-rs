@@ -108,5 +108,7 @@ jobs:
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" dist/* --clobber
           else
-            gh release create "$TAG" dist/* --verify-tag --notes-from-tag
+            # Named after the version alone, 0.4.1 for v0.4.1; the tag's
+            # message gives the notes.
+            gh release create "$TAG" dist/* --verify-tag --notes-from-tag --title "${TAG#v}"
           fi

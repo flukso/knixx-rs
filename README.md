@@ -76,6 +76,13 @@ through an onsemi NCN5121 transceiver on UARTE0 at 38400 baud.
   and a history, see [Console](#console).
 - **BLE console.** `nus on` moves the console to the Nordic UART Service
   (NUS) on Bluetooth LE, see [BLE console](#ble-console).
+- **Pairing.** BLE takes a paired central: one that bonded with the board
+  while the console was on BLE, which takes the USB console or the wall
+  switches. Up to four bonds are kept, see [Pairing](#pairing).
+- **Web app.** With the `web-ble` firmware, a browser on a phone or a
+  computer switches the lights of the installation and sends any group
+  value, over Web Bluetooth and the board's knixx GATT service, see
+  [Web app](#web-app).
 - **Scripts.** Up to four scripts in Rhai, written from a template on the
   host, compiled to Rhai Grain bytecode and uploaded with `bolt script`,
   see [Scripts](#scripts). Each gets every telegram on the bus and a call
@@ -111,16 +118,20 @@ The firmware and the host tools build on macOS and Linux.
   `$CC`.
 - For the CAD tools in `cad/` only: Python 3.11 to 3.14, see
   [Renders and front plate](#renders-and-front-plate).
+- For the web app in `web/` only: [trunk](https://trunkrs.dev),
+  `cargo install trunk --locked` or `brew install trunk`;
+  `web/rust-toolchain.toml` adds the `wasm32-unknown-unknown` target.
 
 ```sh
-cargo xtask build    # build the firmware: build/knixx.{elf,uf2,hex}, build/knixx-dfu.zip
-cargo xtask flash    # build and flash over USB; --port picks the serial port
+cargo xtask build    # build the firmware: build/knixx.{elf,uf2,hex}, build/knixx-dfu.zip; --web-ble, --no-scripts
+cargo xtask flash    # build and flash over USB; --port picks the serial port; --web-ble, --no-scripts
 cargo xtask ota      # build and flash over BLE (run ota on the console first); --addr picks a board
 cargo xtask term     # a terminal on the console, on USB, else BLE; --usb, --ble, --port, --addr
 cargo xtask cycle N  # build, then flash N times, checking USB and BLE after each
 cargo xtask golden   # record the VL53L7CX golden log with ST's C driver; --check compares
 cargo xtask genfw    # extract the VL53L7CX firmware from ST's driver; --check compares
 cargo xtask cad      # the renders and the front plate: render, frontplate, readme, clean
+cargo xtask web      # serve the web app on localhost; --build builds it into web/dist/
 cargo test           # the host tests
 bolt script upload <script>  # build <script>.rhai and run it on the board; see Scripts
 ```
@@ -137,8 +148,10 @@ tracked files differ from it) and the build time in UTC, and writes
 `build/knixx-dfu.zip`. It reports the flash and RAM the firmware takes, and
 fails when the image does not fit `0x26000`–`0xED000`, or on the heap rule
 below. `cargo xtask build --no-scripts` builds the firmware without scripts:
-about 376 KB of flash, against 634 KB with them, of which Rhai is some
-165 KB.
+about 440 KB of flash, against 698 KB with them, of which Rhai is some
+165 KB and BLE pairing (LE Secure Connections, with its P-256 code) some
+64 KB. `cargo xtask build --web-ble` adds the knixx GATT service for the
+[web app](#web-app), about 12 KB more; the flags combine.
 
 **A heap for scripts only.** The crates in `crates/` are `no_std` without
 `alloc`, and buffers are fixed size, in statics or in the embassy tasks.
@@ -151,9 +164,9 @@ anywhere else shows at once. `sys` shows the heap in use and the most used
 since boot. Without the `scripts` feature the firmware links no allocator at
 all, and `cargo xtask build --no-scripts` fails if it does.
 
-**RAM.** The statics take about 52 KiB without scripts and 107 KiB with
-them, the heap included; the stack below them has the rest, about 204 KiB
-without scripts and 149 KiB with them. flip-link puts the stack at the
+**RAM.** The statics take about 57 KiB without scripts and 111 KiB with
+them, the heap included; the stack below them has the rest, about 199 KiB
+without scripts and 145 KiB with them. flip-link puts the stack at the
 bottom of RAM, so that an overflow faults instead of overwriting statics. The embassy tasks live in statics; the stack
 serves `main`, the executor and the interrupt handlers. `sys` shows the most
 of it used since boot: the firmware paints the stack at boot and finds the
@@ -181,6 +194,25 @@ the panic record: 256 bytes that the UF2 bootloader, whose RAM starts at
 stack starts after it, at `0x20000108`.
 
 ## Flashing
+
+### From a release
+
+Each [GitHub release](https://github.com/flukso/knixx-rs/releases) carries
+the firmware, so that a board can be flashed without building it:
+
+| file | what |
+|---|---|
+| `knixx.uf2` | the firmware, for the UF2 bootloader's drive (USB) |
+| `knixx-dfu.zip` | the firmware as a DFU package (BLE) |
+| `knixx.hex`, `knixx.elf` | the firmware for a debug probe, and with its symbols |
+| `knixx-web-ble.uf2`, `knixx-web-ble-dfu.zip`, … | the firmware with the knixx GATT service for the [web app](#web-app) |
+| `bolt-<tag>-<target>.tar.gz` | `bolt` for Linux (x86_64, aarch64) and Apple Silicon macOS |
+
+Double-tap reset to get the bootloader's `FTHR840BOOT` drive and copy a
+`.uf2` onto it, or use `bolt uf2 knixx.uf2`. On macOS, a `bolt` downloaded
+with a browser is quarantined: `xattr -d com.apple.quarantine bolt` lets it
+run. A tag `v*` pushed to GitHub makes the release
+(`.github/workflows/release.yml`).
 
 ### Over USB
 
@@ -232,7 +264,7 @@ USB and the BLE controller can hang.
 
 The packets carry as much as the negotiated ATT MTU allows, 244 bytes with
 the bootloader's MTU of 247, which sent a 364 KB image in about a minute
-(the firmware with scripts is about 634 KB);
+(the firmware with scripts is about 698 KB);
 `bolt ota --chunk` sets another size. Phone apps that speak legacy DFU, such
 as nRF Connect or Bluefruit Connect, can also send `build/knixx-dfu.zip`.
 
@@ -305,6 +337,7 @@ pulled while a terminal was open, would stall every writer, the bus with
 | `sensor` | the latest temperature, humidity and illuminance reading |
 | `tof` | the ToF state, settings, warnings, motion count and the per zone motion of the last motion frame |
 | `nus [on\|off]` | show the BLE console state, move the console to BLE NUS or back to USB |
+| `ble [forget all\|<address>]` | show `ble.pair`, the knixx service and the bonded centrals, or forget bonds, see [Pairing](#pairing) |
 | `script [ls] \| info <name> \| rm <name> \| put <name> <size> <crc32>` | the scripts in `/scripts` with their state; what the board knows of one; remove one; `put` receives one, as `bolt script upload` sends it, see [Scripts](#scripts) |
 | `ota` | reboot into the bootloader for a BLE firmware update, see [Over BLE](#over-ble) |
 | `version` | the commit and build time of the firmware, `version <commit> built <date>`, also shown in the banner |
@@ -349,9 +382,79 @@ same, and A off + B on does `nus off`.
 - The console also goes back to USB after 60 s without a connected central,
   counted from `nus on` or the last disconnect, and on reset, since BLE is
   off at boot.
-- **Security:** NUS has no pairing: while it is on, anyone in range can
-  connect and use the console, including `config set` and the upload of
-  scripts, which can send any group telegram. Keep it on only while needed.
+- **Security:** with `ble.pair` on, the default, only a paired central gets
+  the console, see [Pairing](#pairing). With it off, anyone in range can
+  connect while NUS is on and use the console, including `config set` and
+  the upload of scripts, which can send any group telegram.
+
+### Pairing
+
+The console on BLE can change the configuration and upload scripts, and
+the knixx service of the [web app](#web-app) sends any group telegram. So
+while `ble.pair` is on, as it is by default, the board serves both only to
+a **paired** central: a phone or computer that bonded with the board, and
+one bond opens both services.
+
+**Pairing a phone or computer.** Pairing is only possible while the
+console is on BLE: after `nus on` on the USB console, or after holding
+A on + B off on the wall switches for 5 s. Both take someone at the board.
+That is the *pairing window*; it closes with `nus off`, or after 60 s
+without a connection.
+
+1. Turn the console to BLE with `nus on` (or the switch gesture). It says
+   `nus: pairing open`.
+2. Connect from the phone or computer: `bolt term --ble`, the web app, or
+   any BLE terminal.
+3. The phone or computer asks to pair: accept. The board takes LE Secure
+   Connections pairing ("Just Works": there is no code to compare, as the
+   board has no display), stores the bond and prints `ble: bonded with
+   <address>`.
+
+From then on the phone or computer gets in without asking, with the
+console on BLE or not, until either side forgets the bond.
+
+- **macOS:** the system shows the pairing request the first time; bolt and
+  Chrome on the same Mac share the bond.
+- **Linux:** bolt cannot pair by itself, BlueZ needs an agent. Pair once
+  with `bluetoothctl pair <address>` while the pairing window is open. bolt
+  tells you so when the board refuses it.
+- **Android and Windows:** Chrome's pairing goes through the system, which
+  asks the first time.
+
+**Outside the window.** A central that is not bonded is refused: its
+requests get "insufficient encryption", and a pairing it starts gives no
+bond and drops the link. The USB console always works, so a lost phone is
+never a lockout.
+
+**Bonds.** The board keeps up to 4, in `/ble/bonds` on the flash; a fifth
+replaces the oldest.
+
+```text
+ble                     the pairing setting, the knixx service and the bonds
+ble forget <address>    forget one bond, by the address ble lists
+ble forget all          forget every bond
+```
+
+After `ble forget`, the phone or computer still holds its half of the bond
+and fails to connect ("Device disconnected"): remove `knixx` in its
+Bluetooth settings too (`bluetoothctl remove <address>` on Linux), then
+pair again in a pairing window.
+
+**Firmware updates.** Phones and computers cache the services of a bonded
+board. When an update changes them, for example to or from the `web-ble`
+firmware, the board tells each bonded central on its next connection (the
+GATT Service Changed indication), and the central reads them again. A
+central that bonded with firmware older than this has no Service Changed
+in its cache and needs pairing once more. The last line of `ble` shows
+what the last bonded connection did about it.
+
+**Without pairing.** `config set ble.pair off` turns the check off at once
+and saves it: anyone in range then gets the console and the knixx service
+while the board advertises. The bonds stay, so turning it on again needs no
+new pairing; a connected central that is not paired is dropped then.
+
+**OTA.** `ota` starts the Adafruit bootloader's DFU mode, which has no
+pairing; reaching it takes the console, so a paired central or USB.
 
 ## Configuration
 
@@ -385,6 +488,10 @@ frequency = 1
 integration = 5
 min_distance = 400
 max_distance = 1500
+
+[ble]
+pair = on
+knixx = off
 ```
 
 This file is written when the flash holds no `knixx.ini`, and `config init`
@@ -406,6 +513,8 @@ value in the *missing* column below, which for the group addresses is
 | `occupancy.integration` | integration time per frame, ms | 5 | 5 | 2–1000 |
 | `occupancy.min_distance` | near end of the motion window, mm | 400 | 400 | 400–4000 |
 | `occupancy.max_distance` | far end of the motion window, mm | 1500 | 1500 | 400–4000 |
+| `ble.pair` | whether BLE takes a paired central, see [Pairing](#pairing) | on | on | `on`, `off` |
+| `ble.knixx` | whether the board advertises the knixx service for the [web app](#web-app) all the time | off | off | `on`, `off`; `on` only with the `web-ble` firmware |
 
 Group addresses use the 3-level form 0–31/0–7/0–255. The 2-level form
 (main/sub) and raw numbers are also accepted. 0/0/0, the broadcast address,
@@ -587,6 +696,86 @@ The board reads only bytecode written for its build of Rhai, the integer
 and float widths and the language features: build scripts with the `bolt`
 of the same repository.
 
+## Web app
+
+The web app, in `web/`, switches the lights of the installation from a
+browser and sends any group value, through the board and over Bluetooth
+LE. It runs in Chrome or Edge, on a desktop or on Android: they have Web
+Bluetooth. Safari, iOS and Firefox do not.
+
+It is served at **https://flukso.github.io/knixx-rs/**, from
+`.github/workflows/pages.yml` on every push to `main` that changes it, and
+`cargo xtask web` serves it on localhost while working on it.
+
+### Setting up the board
+
+1. Flash the firmware with the knixx GATT service: `cargo xtask flash
+   --web-ble`, or `knixx-web-ble.uf2` from a [release](#from-a-release).
+   The default firmware leaves the service out, and `config set ble.knixx
+   on` says so.
+2. `config set ble.knixx on`. The board then advertises all the time, not
+   only while the console is on BLE, so that the app finds it.
+3. Pair the phone or computer once, see [Pairing](#pairing): `nus on`, open
+   the app, **Connect**, and accept the pairing request. From then on the
+   app connects without the pairing window.
+
+### Using it
+
+- **Connect** opens the browser's list of boards: it lists the boards that
+  advertise the knixx service. One phone or computer is connected at a
+  time; while the app is, `bolt term --ble` waits.
+- **Lights.** The main view is a grid of 24 lights. Each light has two
+  group addresses: its **switch** address, which a tap on the tile writes
+  (DPT 1.001, on or off), and its **status** address, on which its actuator
+  reports the light's state. By default light *n* is switched on 0/0/*n*
+  and reports on 0/1/*n*.
+  - On connecting, the app reads each status address, one at a time: the
+    next once the board reported the previous one sent, so that the bus and
+    the board's queue are not flooded. 24 lights take a second or two.
+  - A tile shows *on* or *off* from the answers, *?* until its light
+    answers, and *no answer* when none came within 2 s.
+  - From then on, every write or response on a status address, by a wall
+    switch, another device or the app, keeps its tile up to date. A tap
+    writes the opposite of what the tile shows to the switch address; the
+    tile changes once the actuator reports the new state.
+  - A status address answers a read only when its actuator's status object
+    has the read flag (R) set. An installation with another numbering
+    sets the first switch address, the first status address and the
+    number of lights under **Lights**, which the browser remembers.
+- **Send a group value** writes or reads any group address, as DPT 1.001
+  (on/off), 5.001 (0–100 %) or 9.001 (a 2-byte float, such as a
+  temperature).
+- **Bus** logs every group telegram on the bus, the board's own too
+  (*this board*), with its value guessed from its length, and the outcome
+  of the app's sends: *confirmed* by the bus, *negative confirmation*, *no
+  confirmation* (is the bus there?), *refused* or *busy*.
+- **Signal**, at the top right: the strength of the link as the board
+  receives it, in dBm, with bars, every 2 s. Below about -85 dBm the link
+  gets unreliable.
+
+The app sends from the board's individual address, as a script does: the
+board sends group value writes, reads and responses only, with the same
+checks as for scripts.
+
+### The knixx GATT service
+
+The app is one client of the service; any BLE central that pairs can use
+it. The service is `6b6e7801-1b5d-4c8e-a2f0-3e5b9d8c7a10`; its
+characteristics differ in the first group. Every value fits the 20 bytes of
+a notification at the default ATT MTU, and `crates/knixx-knx/src/gatt.rs`
+encodes and decodes them for the board and the app alike.
+
+| characteristic | properties | value |
+|---|---|---|
+| `…7802…` send | write | seq, op (0 write, 1 read, 2 response), group (2 bytes, big endian), priority (0 system … 3 low), data from the APCI octet on, as for DPT 1.001 `01`; a read takes no data |
+| `…7803…` result | notify | seq, status: 0 confirmed, 1 negative confirmation, 2 no confirmation, 3 refused, 4 busy (send again later), 5 failed |
+| `…7804…` group | notify | flags (bit 7: the board's own; bits 4–5: op; bits 0–1: priority), source and destination (2 bytes each, big endian), data |
+| `…7805…` rssi | read, notify | the link's RSSI as the board receives it, dBm, signed, every 2 s |
+
+The board takes a send into the same queue as the console's commands and
+reports its result once the bus confirmed it, or after 500 ms without a
+confirmation. A full queue gives *busy* at once.
+
 ## Hardware connections
 
 | function | Feather pin | nRF52840 |
@@ -610,19 +799,22 @@ The schematics of the knixx Thunder and Thunder Sensor boards are in
 The firmware is one embassy executor on the nRF52840, with tasks for the
 USB device and its sender, the console, the BLE controller and host, the
 bus, the sensors, the ToF sensor, the wall switches, the scripts and the
-LEDs. The console, the switches, the sensors and the ToF queue commands for
-the bus on one channel of 16, the scripts their telegrams on one of 4,
-which the bus serves only when the other is empty. The bus passes every
-telegram it receives to the script task on a channel of 16. The errors and
-the motions trigger the LEDs through a channel of 8. Senders never wait on
-a full channel.
+LEDs. The console, the switches, the sensors, the ToF and the knixx GATT
+service queue commands for the bus on one channel of 16, the scripts their
+telegrams on one of 4, which the bus serves only when the other is empty.
+The bus passes every telegram it receives to the script task on a channel
+of 16, and the group value telegrams and the outcome of its sends to the
+knixx service on channels of 8. The errors and the motions trigger the LEDs
+through a channel of 8. Senders never wait on a full channel.
 
 ```
  console (USB CDC or BLE NUS) ─────┐
  sensor (SHT20, VCNL4040, 60 s) ───┤
- tof    (VL53L7CX INT pulses) ─────┼─► CMDS (16) ────────► bus ─► NCN5121 ─► KNX TP1
- switches (wall switch presses) ───┘                     ▲ │ ▲   UARTE0
-                                                         │ │ └─ L_Data.con, indications
+ tof    (VL53L7CX INT pulses) ─────┤
+ switches (wall switch presses) ───┼─► CMDS (16) ────────► bus ─► NCN5121 ─► KNX TP1
+ knixx GATT (send, web-ble) ───────┘                     ▲ │ ▲   UARTE0
+        ▲                                                │ │ └─ L_Data.con, indications
+        └──────── GROUP (8), RESULTS (8) ◄───────────────│─┤
  runner (scripts, 1 s) ───────────► SCRIPT_CMDS (4) ─────┘ │
         ▲                                                  │
         └──────────────────── TELEGRAMS (16) ◄─────────────┘
@@ -643,7 +835,28 @@ interrupts run at P2 and P3, which the firmware checks at boot. Before
 anything else, `main` clears the POWER and CLOCK state that the bootloader
 leaves when it jumps to the application (nrf-sdc issue #103). The
 controller is set up at boot and stays idle, with the radio silent, until
-`nus on`.
+`nus on`, or for good with `ble.knixx` on.
+
+- **One central at a time**, with NUS and, in the `web-ble` firmware, the
+  knixx service. With the knixx service, the advertising carries its UUID,
+  for the app's filter, and the scan response the NUS UUID: two 128-bit
+  UUIDs and the name do not fit one packet. `nus off` drops the central
+  unless the knixx service keeps the board advertising and the central is
+  bonded.
+- **Pairing** is trouble's LE Secure Connections, with the P-256 code for
+  the Cortex-M4. The check of `ble.pair` is made at run time rather than
+  with the GATT table's permissions, so that it can change without a
+  reboot: the BLE task refuses the requests on NUS and the knixx service of
+  a central that is not let in with "insufficient encryption", and asks
+  for security on connecting. Only a connection made in the pairing window
+  is bondable; a pairing outside it gives no bond, and the link is dropped.
+  The host keeps the bonds, `/ble/bonds` keeps them across resets.
+- **Service Changed.** trouble's GATT service has no Service Changed, so the
+  BLE task builds the GAP and GATT services itself, with it. Each bond keeps
+  the hash of the GATT database its central last saw; a bonded central
+  with another hash gets the indication once its link is encrypted. The
+  board does not store the centrals' subscriptions, so it subscribes the
+  central to Service Changed itself first, as the bond would have kept it.
 
 ### KNX bus
 
@@ -655,7 +868,10 @@ copy of the configuration.
   one by one, each after the previous L_Data.con or its 500 ms timeout.
   Further commands wait until the writes are done. A script's telegram, a
   group value write, read or response, goes the same way, from the board's
-  own address; the scripts' commands wait while the others have one.
+  own address; the scripts' commands wait while the others have one. So
+  does a send of the knixx service. The engine reports the outcome of
+  these sends: confirmed, a negative L_Data.con, none in time, refused, or
+  not handed to the transceiver; the knixx service passes it on.
 - It passes every valid telegram it receives to the scripts, the board's
   own too, which the transceiver returns, marked as such.
 - It wakes on received bytes, on a command and on its next deadline (the
@@ -713,7 +929,7 @@ firmware made. The littlefs2 crate is not used: it pins on-disk version 2.0,
 and littlefs does not mount a filesystem of a later minor version.
 
 Besides `/knixx.ini`, the littlefs holds other files, such as the scripts
-in `/scripts`: the crate reads, writes, removes and lists whole files by
+in `/scripts` and the BLE bonds in `/ble/bonds`: the crate reads, writes, removes and lists whole files by
 path, and makes directories. A write goes to `<path>.tmp` first and is then
 renamed, so that a reset halfway leaves the old file, not part of the new
 one. None of these formats the flash: only the boot does, and only a blank
@@ -752,6 +968,21 @@ the `nus` command, as it alone moves the console.
   turns the firmware ELF into UF2, Intel HEX or a binary. `cargo xtask`
   runs it; `cargo build --release -p bolt` builds it alone, as
   `target/release/bolt`.
+- `web/` is the [web app](#web-app), in Rust with
+  [Leptos](https://leptos.dev), built to wasm with trunk. It is a workspace
+  of its own, like `firmware/`, and uses `crates/knixx-knx` for the knixx
+  service's values, the group addresses and the DPTs. `web/src/ble.rs`
+  holds the Web Bluetooth calls (web-sys keeps them behind
+  `--cfg=web_sys_unstable_apis`, which `web/.cargo/config.toml` sets);
+  `web/src/app.rs` the page.
+
+  ```
+  cargo xtask web            # serve it on http://127.0.0.1:8080, rebuilt on changes
+  cargo xtask web --build    # build it into web/dist/
+  ```
+
+  `localhost` counts as a secure context, so Web Bluetooth works there
+  without HTTPS.
 - `knixx-shell` runs the bus engine and the shared console commands
   (`switch`, `sniff`, `stat`, `config`) on the host, over an NCN5121
   attached through an FTDI USB serial adapter (0403:6001). It uses the ini
@@ -857,7 +1088,7 @@ folds onto the parabola y = 2x² − 1.
 | Path | Contents |
 |---|---|
 | `firmware/` | the firmware workspace, built for the nRF52840 |
-| `crates/knixx-knx` | TP1 frames, individual and group addresses, DPT 1.001/1.018 and DPT 9 packing |
+| `crates/knixx-knx` | TP1 frames, individual and group addresses, DPT 1.001/1.018, 5.001 and DPT 9 packing, the values of the knixx GATT service |
 | `crates/knixx-ncn` | the NCN5121 transceiver's host protocol: requests, the indication parser, their descriptions |
 | `crates/knixx-device` | the device model (switches, sensor and occupancy groups, ToF settings), its INI configuration and `default.ini` |
 | `crates/knixx-bus` | the bus engine: sending with confirmations, stat, occupancy, the sniffer; sans-IO, with an async runner |
@@ -871,6 +1102,7 @@ folds onto the parabola y = 2x² − 1.
 | `host/knixx-host` | host library: firmware images (ELF to UF2, Intel HEX, binary), UF2 files, the bootloader's drive, the USB serial port, flashing, BLE scanning, legacy DFU packages and updates |
 | `host/bolt` | host tool: `bolt convert`, `genpkg`, `ota`, `term`, `script`, `uf2`, `scan` |
 | `host/knixx-shell` | KNX shell on the host over an FTDI-attached NCN5121 |
+| `web/` | the web app: Leptos to wasm, Web Bluetooth |
 | `xtask/` | `cargo xtask` tasks |
 | `pcb/` | the schematics of the knixx Thunder and Thunder Sensor boards |
 | `cad/` | the renders and the front plate |
@@ -888,13 +1120,15 @@ by step, the state, the telegram, the sends and their limits, the errors
 returned rather than panics, the compiler's checks and the fault lines.
 `cargo xtask golden --check` checks the golden log against ST's C driver,
 and `cargo xtask genfw --check` the firmware files against its header.
-`cargo clippy --all-targets` and, in `firmware/`, `cargo clippy --release`
-lint the two workspaces.
+`cargo clippy --all-targets`, in `firmware/` `cargo clippy --release`
+(with `--features web-ble` too), and in `web/` `cargo clippy` lint the
+three workspaces.
 
-CI runs the host tests, the golden log and firmware checks, both lints,
+CI runs the host tests, the golden log and firmware checks, the lints,
 `cargo fmt --check`, the `no_std` build of each crate, `cargo xtask build`
-with and without scripts, with its flash, RAM and heap checks, `cargo
-bloat` and the license check.
+with and without scripts and the knixx service, with its flash, RAM and
+heap checks, `cargo bloat` and the license check of the host workspace and
+of the web app.
 
 ## License
 

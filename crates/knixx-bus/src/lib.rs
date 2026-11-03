@@ -24,6 +24,8 @@ use embassy_time::{Duration, Instant, Timer};
 use knixx_device::thunder::{Device, MAX_GROUPS};
 use knixx_knx::GroupAddress;
 use knixx_knx::tp1::{self, AddrType, Apci, MAX_FRAME, Telegram};
+
+pub use knixx_knx::gatt::Status;
 use knixx_ncn::{self as ncn, Parser, Service, TxBuf};
 
 use decode::Decoder;
@@ -83,11 +85,21 @@ pub enum Command {
     Motion,
     /// Publishes the illuminance in tenths of a lux to the illuminance group.
     Light { illuminance: i32 },
-    /// Sends a telegram from a script: a group value write, read or response
-    /// to a group, with its data from the APCI octet on, as Telegram holds
-    /// it. The engine sends it from the device's individual address, without
-    /// repetition and as an unnumbered data packet; it keeps the priority.
-    Send(Telegram),
+    /// Sends a telegram of a script or of the knixx GATT service: a group
+    /// value write, read or response to a group, with its data from the APCI
+    /// octet on, as Telegram holds it. The engine sends it from the device's
+    /// individual address, without repetition and as an unnumbered data
+    /// packet; it keeps the priority. It reports the outcome to
+    /// [`Output::sent`] with the tag.
+    Send { tg: Telegram, tag: Tag },
+}
+
+/// Who sent a telegram with [`Command::Send`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tag {
+    Script,
+    /// The knixx GATT service, with the central's sequence number.
+    Gatt(u8),
 }
 
 /// Receives everything the engine prints, and the telegrams on the bus.
@@ -100,6 +112,8 @@ pub trait Output {
     /// the transceiver returns each telegram it sends, and own tells those
     /// from the others, by their source address.
     fn telegram(&mut self, _tg: &Telegram, _own: bool) {}
+    /// Is called with the outcome of each [`Command::Send`].
+    fn sent(&mut self, _tag: Tag, _status: Status) {}
 }
 
 /// Prints an error line on out and reports it to out.failed.
@@ -275,10 +289,12 @@ pub struct Engine<'a> {
     queue: [Write; MAX_GROUPS],
     nq: usize,
     next: usize,
-    /// The telegram of a script, before it is sent.
-    script: Option<Telegram>,
-    /// Whether the L_Data.con for group is awaited, until con_deadline.
+    /// The telegram of a Command::Send, before it is sent.
+    script: Option<(Telegram, Tag)>,
+    /// Whether the L_Data.con for group is awaited, until con_deadline, and
+    /// the tag of the Command::Send it is for.
     awaiting: bool,
+    sending: Option<Tag>,
     group: u16,
     con_deadline: Instant,
     /// A stat request waits for poll; the replies are awaited until
@@ -309,6 +325,7 @@ impl<'a> Engine<'a> {
             next: 0,
             script: None,
             awaiting: false,
+            sending: None,
             group: 0,
             con_deadline: Instant::MIN,
             stat_req: false,
@@ -383,16 +400,17 @@ impl<'a> Engine<'a> {
                 self.next = 0;
             }
             Command::Stat => self.stat_req = true,
-            Command::Send(tg) => {
+            Command::Send { tg, tag } => {
                 if let Some(why) = refuse(&tg) {
                     let g = GroupAddress(tg.dest);
                     errorln(&mut self.rx.line, out, format_args!("bus: send to {g}: {why}"));
+                    out.sent(tag, Status::Refused);
                     return;
                 }
                 let mut t = self.cur.group_write(tg.dest, tg.data());
                 t.apci = tg.apci;
                 t.ctrl.priority = tg.ctrl.priority;
-                self.script = Some(t);
+                self.script = Some((t, tag));
             }
             Command::Config(dev) => {
                 self.cur = dev;
@@ -410,6 +428,14 @@ impl<'a> Engine<'a> {
         }
         if self.awaiting && self.rx.got_con {
             self.awaiting = false;
+            if let Some(tag) = self.sending.take() {
+                let s = if self.rx.con_positive {
+                    Status::Confirmed
+                } else {
+                    Status::Negative
+                };
+                out.sent(tag, s);
+            }
             if self.rx.con_positive {
             } else if self.flags.sniff.load(Ordering::Relaxed) {
                 // The sniffer has shown it already.
@@ -464,6 +490,9 @@ impl<'a> Engine<'a> {
                 return None;
             }
             self.awaiting = false;
+            if let Some(tag) = self.sending.take() {
+                out.sent(tag, Status::NoCon);
+            }
             let g = GroupAddress(self.group);
             errorln(&mut self.rx.line, out, format_args!("  no L_Data.con for {g}"));
         }
@@ -476,16 +505,20 @@ impl<'a> Engine<'a> {
                 self.next = 0;
             }
         }
-        if let Some(t) = self.script.take() {
+        if let Some((t, tag)) = self.script.take() {
             self.group = t.dest;
             match self.tx.send_telegram(&t) {
                 Ok(n) => {
                     self.awaiting = true;
+                    self.sending = Some(tag);
                     self.rx.got_con = false;
                     self.con_deadline = now + CON_TIMEOUT;
                     return Some(&self.tx.req[..n]);
                 }
-                Err(e) => errorln(&mut self.rx.line, out, format_args!("{e}")),
+                Err(e) => {
+                    errorln(&mut self.rx.line, out, format_args!("{e}"));
+                    out.sent(tag, Status::Failed);
+                }
             }
         }
         while self.next < self.nq {
@@ -508,9 +541,12 @@ impl<'a> Engine<'a> {
     /// Reports that the bytes poll returned last could not be written to the
     /// transceiver: nothing will answer them, so the engine stops waiting for
     /// the L_Data.con or the stat replies, as Go did on a write error.
-    pub fn transmit_failed(&mut self) {
+    pub fn transmit_failed(&mut self, out: &mut impl Output) {
         if self.awaiting {
             self.awaiting = false;
+            if let Some(tag) = self.sending.take() {
+                out.sent(tag, Status::Failed);
+            }
         } else if self.rx.stat {
             self.rx.stat = false;
         }
@@ -564,7 +600,7 @@ where
                     out,
                     format_args!("bus: uart write: {kind:?}"),
                 );
-                engine.transmit_failed();
+                engine.transmit_failed(out);
             }
         }
 

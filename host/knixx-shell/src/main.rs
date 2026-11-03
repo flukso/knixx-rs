@@ -120,7 +120,7 @@ fn run_engine(
         while let Some(b) = engine.poll(now(start), &mut out) {
             if let Err(e) = port.write_all(b) {
                 out.write(format!("bus: uart write: {e}\n").as_bytes());
-                engine.transmit_failed();
+                engine.transmit_failed(&mut out);
             }
         }
         if engine.accepts_commands() {

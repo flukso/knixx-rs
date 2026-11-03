@@ -47,6 +47,7 @@ pub(crate) struct Capture {
     pub(crate) text: String,
     pub(crate) errors: u32,
     pub(crate) telegrams: Vec<(Telegram, bool)>,
+    pub(crate) sent: Vec<(Tag, Status)>,
 }
 
 impl Output for Capture {
@@ -61,6 +62,10 @@ impl Output for Capture {
 
     fn telegram(&mut self, tg: &Telegram, own: bool) {
         self.telegrams.push((*tg, own));
+    }
+
+    fn sent(&mut self, tag: Tag, status: Status) {
+        self.sent.push((tag, status));
     }
 }
 
@@ -313,18 +318,18 @@ fn transmit_failed() {
     let mut engine = Engine::new(test_device(), &flags);
     engine.command(switch(1, true), T0, &mut out);
     assert!(engine.poll(T0, &mut out).is_some());
-    engine.transmit_failed();
+    engine.transmit_failed(&mut out);
     assert!(engine.poll(T0, &mut out).is_some(), "the next write waits");
-    engine.transmit_failed();
+    engine.transmit_failed(&mut out);
     assert!(engine.poll(T0, &mut out).is_some());
-    engine.transmit_failed();
+    engine.transmit_failed(&mut out);
     assert!(engine.poll(T0, &mut out).is_none());
     assert!(engine.accepts_commands());
     assert_eq!(engine.deadline(), None);
 
     engine.command(Command::Stat, T0, &mut out);
     assert!(engine.poll(T0, &mut out).is_some());
-    engine.transmit_failed();
+    engine.transmit_failed(&mut out);
     assert!(engine.accepts_commands());
     assert_eq!(engine.poll(T0 + Duration::from_secs(1), &mut out), None);
     assert_eq!(out.text, "");
@@ -630,7 +635,20 @@ fn send_from_a_script() {
         &mut d,
         &dev,
         &flags,
-        &[Command::Send(write), Command::Send(read), Command::Send(response)],
+        &[
+            Command::Send {
+                tg: write,
+                tag: Tag::Script,
+            },
+            Command::Send {
+                tg: read,
+                tag: Tag::Script,
+            },
+            Command::Send {
+                tg: response,
+                tag: Tag::Script,
+            },
+        ],
     );
     // The device's source address, its routing and transport, one at a time
     // after each L_Data.con.
@@ -670,9 +688,81 @@ fn send_refused() {
         (empty, "bad data length"),
     ] {
         let mut d = FakeDevice::default();
-        let got = run(&mut d, &dev, &flags, &[Command::Send(tg)]);
+        let got = run(&mut d, &dev, &flags, &[Command::Send { tg, tag: Tag::Script }]);
         assert!(d.written.is_empty(), "{why}: sent {:?}", d.written);
         assert_eq!(got.errors, 1, "{why}");
         assert!(got.text.contains(why), "{why}: {:?}", got.text);
+        assert_eq!(got.sent, [(Tag::Script, Status::Refused)], "{why}");
     }
+}
+
+/// Each Command::Send reports its outcome with its tag; the switches' and
+/// the sensors' telegrams report none.
+#[test]
+fn send_results() {
+    let dev = test_device();
+    let flags = Flags::new();
+    let write = script_telegram(0x0909, tp1::Apci::GroupValueWrite, &[0x01]);
+    let read = script_telegram(0x0909, tp1::Apci::GroupValueRead, &[0x00]);
+    let cmds = [
+        Command::Send {
+            tg: write,
+            tag: Tag::Gatt(7),
+        },
+        switch(0, true),
+        Command::Send {
+            tg: read,
+            tag: Tag::Script,
+        },
+    ];
+
+    let mut d = FakeDevice {
+        confirm: true,
+        ..FakeDevice::default()
+    };
+    let got = run(&mut d, &dev, &flags, &cmds);
+    assert_eq!(
+        got.sent,
+        [
+            (Tag::Gatt(7), Status::Confirmed),
+            (Tag::Script, Status::Confirmed)
+        ]
+    );
+
+    // Without a transceiver that answers, the L_Data.con times out.
+    let got = run(&mut FakeDevice::default(), &dev, &flags, &cmds);
+    assert_eq!(
+        got.sent,
+        [(Tag::Gatt(7), Status::NoCon), (Tag::Script, Status::NoCon)]
+    );
+
+    // A negative L_Data.con.
+    let mut out = Capture::default();
+    let mut engine = Engine::new(dev, &flags);
+    engine.command(
+        Command::Send {
+            tg: write,
+            tag: Tag::Gatt(8),
+        },
+        T0,
+        &mut out,
+    );
+    assert!(engine.poll(T0, &mut out).is_some());
+    engine.feed(&[0x0b], T0, &mut out);
+    assert_eq!(out.sent, [(Tag::Gatt(8), Status::Negative)]);
+    assert!(engine.accepts_commands());
+
+    // A request that could not be written.
+    let mut out = Capture::default();
+    engine.command(
+        Command::Send {
+            tg: write,
+            tag: Tag::Gatt(9),
+        },
+        T0,
+        &mut out,
+    );
+    assert!(engine.poll(T0, &mut out).is_some());
+    engine.transmit_failed(&mut out);
+    assert_eq!(out.sent, [(Tag::Gatt(9), Status::Failed)]);
 }

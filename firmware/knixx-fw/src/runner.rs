@@ -19,7 +19,7 @@ use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, ThreadModeRawMutex};
 use embassy_sync::channel::Channel;
 use embassy_time::{Duration, Instant, Ticker};
-use knixx_bus::Command;
+use knixx_bus::{Command, Tag};
 use knixx_console::upload::Name;
 use knixx_knx::tp1::Telegram;
 use knixx_script::{Host, Runtime, Script};
@@ -200,7 +200,12 @@ struct Firmware;
 
 impl Host for Firmware {
     fn send(&mut self, tg: &Telegram) -> bool {
-        let ok = bus::SCRIPT_CMDS.try_send(Command::Send(*tg)).is_ok();
+        let ok = bus::SCRIPT_CMDS
+            .try_send(Command::Send {
+                tg: *tg,
+                tag: Tag::Script,
+            })
+            .is_ok();
         if !ok {
             leds::signal(Mode::Error);
         }

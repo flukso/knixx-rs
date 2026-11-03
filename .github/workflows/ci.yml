@@ -29,6 +29,7 @@ jobs:
           cargo clippy --all-targets -- -D warnings
           (cd firmware && cargo clippy --release -- -D warnings)
           (cd firmware && cargo clippy --release --features web-ble -- -D warnings)
+          (cd firmware && cargo clippy --release --features web-ble,coded-phy -- -D warnings)
       - name: Format
         run: |
           cargo fmt --check
@@ -47,6 +48,7 @@ jobs:
           cargo xtask build --no-scripts
           cargo xtask build --web-ble --no-scripts
           cargo xtask build --web-ble
+          cargo xtask build --web-ble --coded-phy
           cargo xtask build
       - name: cargo-bloat
         uses: taiki-e/install-action@v2

@@ -44,12 +44,29 @@ const L2CAP_RXQ: u8 = 3;
 
 /// The memory of the SoftDevice Controller for its configuration below; sys
 /// shows what the controller needs of it.
+#[cfg(not(feature = "coded-phy"))]
 pub const SDC_MEM: usize = 2880;
+#[cfg(feature = "coded-phy")]
+pub const SDC_MEM: usize = 7616;
+
+/// The peripheral links of the controller. The board serves one central,
+/// but the controller reserves a link for each connectable advertising set
+/// it runs, so the coded build needs two; the host drops a second central
+/// that connects in the same moment.
+const PERIPHERALS: u8 = if cfg!(feature = "coded-phy") { 2 } else { 1 };
+
+/// The advertising sets: 1M, and with coded-phy one on the coded PHY.
+const ADV_SETS: usize = if cfg!(feature = "coded-phy") { 2 } else { 1 };
+
+/// The most bytes of advertising data of a set: the coded set has no scan
+/// response, so the flags, the services and the name share one packet.
+const ADV_DATA: usize = if cfg!(feature = "coded-phy") { 64 } else { 31 };
 
 /// The memory the controller needs for its configuration, for sys.
 pub static MEM_NEEDED: AtomicUsize = AtomicUsize::new(0);
 
 /// The TX power handle types of Nordic's vendor command.
+#[cfg(not(feature = "coded-phy"))]
 const TX_POWER_ADV: u8 = 0;
 const TX_POWER_CONN: u8 = 2;
 
@@ -136,13 +153,21 @@ pub fn start(
     // central asks for, and the TX power of ble.tx_power.
     let builder = sdc::Builder::new()
         .and_then(|b| {
-            b.support_adv()
-                .support_peripheral()
+            #[cfg(not(feature = "coded-phy"))]
+            let b = b.support_adv();
+            // Extended advertising, which also does legacy, for a second
+            // advertising set on the coded PHY, with room for the services
+            // and the name in one packet.
+            #[cfg(feature = "coded-phy")]
+            let b = b.support_ext_adv().support_le_coded_phy();
+            b.support_peripheral()
                 .support_le_2m_phy()
                 .support_phy_update_peripheral()
                 .support_dle_peripheral()
-                .peripheral_count(1)
+                .peripheral_count(PERIPHERALS)
         })
+        .and_then(|b| b.adv_count(ADV_SETS as u8))
+        .and_then(|b| b.adv_buffer_cfg(ADV_DATA as u16))
         .and_then(|b| {
             b.buffer_cfg(
                 DefaultPacketPool::MTU as u16,
@@ -175,7 +200,7 @@ async fn ble_task(sdc: SoftdeviceController<'static>) -> ! {
 
     // One bond more than bonds::MAX: the host stores a new bond itself, so
     // it needs room for it before the oldest is dropped.
-    static RESOURCES: StaticCell<HostResources<DefaultPacketPool, 1, 2, 1, { bonds::MAX + 1 }>> =
+    static RESOURCES: StaticCell<HostResources<DefaultPacketPool, 1, 2, ADV_SETS, { bonds::MAX + 1 }>> =
         StaticCell::new();
     static STACK: StaticCell<Stack> = StaticCell::new();
     let stack = STACK.init(
@@ -232,9 +257,14 @@ async fn serve(
         adv_data: &adv_data[..len],
         scan_data: &scan_data[..scan_len],
     };
+    #[cfg(feature = "coded-phy")]
+    let mut coded_data = [0u8; ADV_DATA];
+    #[cfg(feature = "coded-phy")]
+    let coded_len = coded_advertising(&mut coded_data);
 
     // Whether the console asked for NUS: the last CONTROL.
     let mut nus_on = false;
+    let mut adv_failed = false;
     loop {
         if !nus_on && !knixx_on() {
             match select(nus::CONTROL.wait(), bonds::CHANGED.wait()).await {
@@ -248,17 +278,62 @@ async fn serve(
             }
             continue;
         }
+        #[cfg(not(feature = "coded-phy"))]
         set_tx_power(stack, TX_POWER_ADV, 0).await;
         let accept = async {
+            #[cfg(not(feature = "coded-phy"))]
             let advertiser = peripheral
                 .advertise(&AdvertisementParameters::default(), adv)
                 .await?;
-            Ok::<_, BleHostError<_>>(advertiser.accept().await?.with_attribute_server(server)?)
+            // With extended advertising only, which the controller holds to
+            // once used: the 1M set, and the coded one while ble.coded is on.
+            #[cfg(feature = "coded-phy")]
+            let advertiser = {
+                let ble = console::device().ble;
+                let power = tx_power(ble.tx_power);
+                let sets = [
+                    AdvertisementSet {
+                        params: AdvertisementParameters {
+                            tx_power: power,
+                            ..Default::default()
+                        },
+                        data: adv,
+                        address: None,
+                    },
+                    AdvertisementSet {
+                        params: AdvertisementParameters {
+                            primary_phy: PhyKind::LeCoded,
+                            secondary_phy: PhyKind::LeCoded,
+                            tx_power: power,
+                            ..Default::default()
+                        },
+                        data: Advertisement::ExtConnectableNonscannableUndirected {
+                            adv_data: &coded_data[..coded_len],
+                        },
+                        address: None,
+                    },
+                ];
+                let mut handles = AdvertisementSet::handles(&sets);
+                let n = if ble.coded { 2 } else { 1 };
+                peripheral.advertise_ext(&sets[..n], &mut handles[..n]).await?
+            };
+            let conn = advertiser.accept().await?.with_attribute_server(server)?;
+            // The other set advertises on: stop it.
+            #[cfg(feature = "coded-phy")]
+            let _ = stack
+                .command(bt_hci::cmd::le::LeSetExtAdvEnable::new(false, &[]))
+                .await;
+            Ok::<_, BleHostError<_>>(conn)
         };
         // The advertising stops as its future is dropped.
         let conn = match select3(accept, nus::CONTROL.wait(), bonds::CHANGED.wait()).await {
             Either3::First(Ok(conn)) => conn,
-            Either3::First(Err(_)) => {
+            Either3::First(Err(e)) => {
+                // Said once, until advertising works again.
+                if !adv_failed {
+                    adv_failed = true;
+                    let _ = writeln!(console::Out, "ble: advertising failed: {e:?}");
+                }
                 Timer::after_secs(1).await;
                 continue;
             }
@@ -271,10 +346,13 @@ async fn serve(
             }
             Either3::Third(()) => {
                 sync_bonds(stack);
+                // New settings: a failure of theirs is news.
+                adv_failed = false;
                 continue;
             }
         };
 
+        adv_failed = false;
         nus::OUT.lock(|q| q.borrow_mut().reset());
         let p = conn.raw().params();
         let mut peer = [0; 6];
@@ -442,6 +520,46 @@ fn advertising(adv: &mut [u8; 31], scan: &mut [u8; 31]) -> (usize, usize) {
         None => 0,
     };
     (len, scan_len)
+}
+
+/// Fills the advertising data of the coded set, which has no scan response:
+/// the flags, every service UUID and the name, and returns its length.
+#[cfg(feature = "coded-phy")]
+fn coded_advertising(adv: &mut [u8; ADV_DATA]) -> usize {
+    #[cfg(feature = "web-ble")]
+    let uuids = [knixx_gatt::SERVICE_UUID_LE, NUS_UUID_LE];
+    #[cfg(not(feature = "web-ble"))]
+    let uuids = [NUS_UUID_LE];
+    AdStructure::encode_slice(
+        &[
+            AdStructure::Flags(LE_GENERAL_DISCOVERABLE | BR_EDR_NOT_SUPPORTED),
+            AdStructure::CompleteServiceUuids128(&uuids),
+            AdStructure::CompleteLocalName(nus::NAME.as_bytes()),
+        ],
+        adv,
+    )
+    .expect("coded advertising data")
+}
+
+/// The advertising TX power of dbm, one of thunder::TX_POWERS.
+#[cfg(feature = "coded-phy")]
+fn tx_power(dbm: i8) -> TxPower {
+    match dbm {
+        -40 => TxPower::Minus40dBm,
+        -20 => TxPower::Minus20dBm,
+        -16 => TxPower::Minus16dBm,
+        -12 => TxPower::Minus12dBm,
+        -8 => TxPower::Minus8dBm,
+        -4 => TxPower::Minus4dBm,
+        2 => TxPower::Plus2dBm,
+        3 => TxPower::Plus3dBm,
+        4 => TxPower::Plus4dBm,
+        5 => TxPower::Plus5dBm,
+        6 => TxPower::Plus6dBm,
+        7 => TxPower::Plus7dBm,
+        8 => TxPower::Plus8dBm,
+        _ => TxPower::ZerodBm,
+    }
 }
 
 /// Whether the knixx service keeps the board advertising: ble.knixx, in a

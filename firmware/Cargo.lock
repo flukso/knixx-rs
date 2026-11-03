@@ -1109,6 +1109,7 @@ dependencies = [
 name = "knixx-fw"
 version = "0.1.0"
 dependencies = [
+ "bt-hci",
  "cortex-m",
  "cortex-m-rt",
  "embassy-embedded-hal",

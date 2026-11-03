@@ -30,6 +30,7 @@ static_cell = "2.1.1"
 heapless = "0.9"
 rlsf = { version = "0.2.3", optional = true }
 knixx-script = { path = "../../crates/knixx-script", default-features = false, features = ["no_std"], optional = true }
+bt-hci = { version = "0.10.1", default-features = false }
 trouble-host = { version = "0.8.0", default-features = false, features = ["peripheral", "gatt", "default-packet-pool", "derive", "security", "security-p256-cortex-m4"] }
 
 [features]
@@ -40,5 +41,7 @@ scripts = ["dep:rlsf", "dep:knixx-script"]
 # The knixx GATT service, for a web app on Web Bluetooth: group value writes,
 # reads and responses through the board, and the group telegrams on the bus.
 web-ble = []
-# Long-range advertising and connections on the LE Coded PHY, next to 1M.
-coded-phy = []
+# Long-range advertising and connections on the LE Coded PHY, next to 1M:
+# the controller's multirole library (extended advertising, coded PHY) and
+# trouble's extended advertising.
+coded-phy = ["nrf-sdc/multirole", "trouble-host/extended-advertising"]

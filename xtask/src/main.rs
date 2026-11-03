@@ -38,11 +38,13 @@ tasks:
   build   build the firmware and write build/knixx.{elf,uf2,hex} and the
           DFU package build/knixx-dfu.zip [--no-scripts: without Rhai
           Grain and its heap, so that no allocator is linked] [--web-ble:
-          with the knixx GATT service for the web app]
+          with the knixx GATT service for the web app] [--coded-phy: with
+          advertising and connections on the LE Coded PHY]
   flash   build, flash over USB and check the board runs the build
-          [--port <serial port>] [--no-scripts] [--web-ble]
+          [--port <serial port>] [--no-scripts] [--web-ble] [--coded-phy]
   ota     build, then send build/knixx-dfu.zip over BLE to a board in BLE
           DFU mode (run ota on its console) [--no-scripts] [--web-ble]
+          [--coded-phy]
           [bolt ota flags, e.g. --addr]
   term    a terminal on the console, over USB or BLE [bolt term flags]
   golden  record crates/knixx-vl53l7cx/testdata/configure.golden with ST's
@@ -62,20 +64,23 @@ tasks:
 struct Features {
     scripts: bool,
     web_ble: bool,
+    coded_phy: bool,
 }
 
 impl Features {
-    /// Takes --no-scripts and --web-ble out of args.
+    /// Takes --no-scripts, --web-ble and --coded-phy out of args.
     fn take(args: &[String]) -> (Features, Vec<String>) {
         let mut f = Features {
             scripts: true,
             web_ble: false,
+            coded_phy: false,
         };
         let mut rest = Vec::new();
         for a in args {
             match a.as_str() {
                 "--no-scripts" => f.scripts = false,
                 "--web-ble" => f.web_ble = true,
+                "--coded-phy" => f.coded_phy = true,
                 _ => rest.push(a.clone()),
             }
         }
@@ -89,7 +94,7 @@ fn main() -> Result<()> {
     match args.first().map(String::as_str) {
         Some("build") => {
             if !rest.is_empty() {
-                bail!("usage: cargo xtask build [--no-scripts] [--web-ble]");
+                bail!("usage: cargo xtask build [--no-scripts] [--web-ble] [--coded-phy]");
             }
             build_with(features).map(|_| ())
         }
@@ -170,8 +175,12 @@ fn build_with(f: Features) -> Result<(PathBuf, Version)> {
     if !scripts {
         cargo.arg("--no-default-features");
     }
-    if f.web_ble {
-        cargo.args(["--features", "web-ble"]);
+    let features: Vec<&str> = [(f.web_ble, "web-ble"), (f.coded_phy, "coded-phy")]
+        .into_iter()
+        .filter_map(|(on, name)| on.then_some(name))
+        .collect();
+    if !features.is_empty() {
+        cargo.args(["--features", &features.join(",")]);
     }
     let status = cargo
         .current_dir(root().join("firmware"))

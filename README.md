@@ -154,10 +154,12 @@ tracked files differ from it) and the build time in UTC, and writes
 `build/knixx-dfu.zip`. It reports the flash and RAM the firmware takes, and
 fails when the image does not fit `0x26000`–`0xED000`, or on the heap rule
 below. `cargo xtask build --no-scripts` builds the firmware without scripts:
-about 440 KB of flash, against 698 KB with them, of which Rhai is some
+about 456 KB of flash, against 714 KB with them, of which Rhai is some
 165 KB and BLE pairing (LE Secure Connections, with its P-256 code) some
 64 KB. `cargo xtask build --web-ble` adds the knixx GATT service for the
-[web app](#web-app), about 12 KB more; the flags combine.
+[web app](#web-app), about 6 KB more, and `--coded-phy` long-range BLE on
+the coded PHY, about 22 KB more (see [Radio](#radio)); the flags combine.
+With all of them the firmware takes 742 KB, 91% of the application's flash.
 
 **A heap for scripts only.** The crates in `crates/` are `no_std` without
 `alloc`, and buffers are fixed size, in statics or in the embassy tasks.
@@ -170,9 +172,10 @@ anywhere else shows at once. `sys` shows the heap in use and the most used
 since boot. Without the `scripts` feature the firmware links no allocator at
 all, and `cargo xtask build --no-scripts` fails if it does.
 
-**RAM.** The statics take about 57 KiB without scripts and 111 KiB with
-them, the heap included; the stack below them has the rest, about 199 KiB
-without scripts and 145 KiB with them. flip-link puts the stack at the
+**RAM.** The statics take about 55 KiB without scripts and 110 KiB with
+them, the heap included (116 KiB with `--web-ble --coded-phy`, whose BLE
+controller needs 7.4 KiB rather than 2.8); the stack below them has the
+rest, about 200 KiB without scripts and 146 KiB with them. flip-link puts the stack at the
 bottom of RAM, so that an overflow faults instead of overwriting statics. The embassy tasks live in statics; the stack
 serves `main`, the executor and the interrupt handlers. `sys` shows the most
 of it used since boot: the firmware paints the stack at boot and finds the
@@ -346,7 +349,7 @@ pulled while a terminal was open, would stall every writer, the bus with
 | `sensor` | the latest temperature, humidity and illuminance reading |
 | `tof` | the ToF state, settings, warnings, motion count and the per zone motion of the last motion frame |
 | `nus [on\|off]` | show the BLE console state, move the console to BLE NUS or back to USB |
-| `ble [forget all\|<address>]` | show `ble.pair`, the knixx service and the bonded centrals, or forget bonds, see [Pairing](#pairing) |
+| `ble [link \| forget all\|<address>]` | show the BLE settings and the bonded centrals, the active connection (`link`, see [Radio](#radio)), or forget bonds, see [Pairing](#pairing) |
 | `script [ls] \| info <name> \| rm <name> \| put <name> <size> <crc32>` | the scripts in `/scripts` with their state; what the board knows of one; remove one; `put` receives one, as `bolt script upload` sends it, see [Scripts](#scripts) |
 | `ota` | reboot into the bootloader for a BLE firmware update, see [Over BLE](#over-ble) |
 | `version` | the commit and build time of the firmware, `version <commit> built <date>`, also shown in the banner |
@@ -465,6 +468,53 @@ new pairing; a connected central that is not paired is dropped then.
 **OTA.** `ota` starts the Adafruit bootloader's DFU mode, which has no
 pairing; reaching it takes the console, so a paired central or USB.
 
+### Radio
+
+**TX power.** `ble.tx_power` sets the radio's transmit power, from -40 to
++8 dBm, for advertising and connections alike; 0 dBm by default. `config
+set ble.tx_power 8` applies at once, without a reconnect: 8 dBm reach about
+2.5 times as far as 0 dBm in free space, for more current in each radio
+event, and -20 dBm keeps the board to the room it is in.
+
+**PHYs and packets.** Every build takes the PHY a central asks for, 1M or
+2M, and link-layer packets of up to 251 bytes instead of 27, which the
+board asks for on connecting: a Mac then runs at 2M with 251-byte packets.
+Uploads over BLE go faster.
+
+**Coded PHY: long range.** The LE Coded PHY sends each bit as 8 symbols
+(S8, 125 kbps): about 4 times the range of 1M at the same TX power, at an
+eighth of its speed. It takes the `coded-phy` firmware (`cargo xtask build
+--coded-phy`, which combines with `--web-ble`) and `config set ble.coded
+on`. The board then advertises twice:
+
+- on 1M as ever, so that every phone and computer finds it, and
+- on coded, for a central that scans the coded PHY.
+
+A central that connects on the coded set gets a coded link; `ble link`
+shows it. Android phones with Bluetooth 5 do coded (nRF Connect scans and
+connects on it); iPhones, Macs and Chrome's Web Bluetooth do not, and keep
+using 1M. A connection on 1M can also move to coded when the central asks.
+
+**`ble link`** shows the active connection, as the board sees it:
+
+```text
+central    a0:9a:8e:94:d5:3f (bonded, encrypted)
+connected  2m14s
+interval   15 ms, latency 0, supervision timeout 4 s
+phy        tx 2M, rx 2M
+data       tx 251 B / 2120 µs, rx 251 B / 2120 µs
+att mtu    247
+tx power   0 dBm
+rssi       -46 dBm
+```
+
+The interval is the one the central settled on (the board asks for 15 ms),
+`data` the largest link-layer packets and their air times both ways, and
+`rssi` the strength of the central's signal as the board receives it, read
+every 2 s; the central's own view of the board's signal follows
+`ble.tx_power`. Without a connection it says `ble link: no central
+connected`.
+
 ## Configuration
 
 The configuration is `/knixx.ini` on a littlefs on the Feather's 2 MiB QSPI
@@ -501,6 +551,8 @@ max_distance = 1500
 [ble]
 pair = on
 knixx = off
+tx_power = 0
+coded = off
 ```
 
 This file is written when the flash holds no `knixx.ini`, and `config init`
@@ -524,6 +576,8 @@ value in the *missing* column below, which for the group addresses is
 | `occupancy.max_distance` | far end of the motion window, mm | 1500 | 1500 | 400–4000 |
 | `ble.pair` | whether BLE takes a paired central, see [Pairing](#pairing) | on | on | `on`, `off` |
 | `ble.knixx` | whether the board advertises the knixx service for the [web app](#web-app) all the time | off | off | `on`, `off`; `on` only with the `web-ble` firmware |
+| `ble.tx_power` | the radio's transmit power, dBm, see [Radio](#radio) | 0 | 0 | -40, -20, -16, -12, -8, -4, 0, 2 to 8 |
+| `ble.coded` | whether the board also advertises on the coded PHY, for long range, see [Radio](#radio) | off | off | `on`, `off`; `on` only with the `coded-phy` firmware |
 
 Group addresses use the 3-level form 0–31/0–7/0–255. The 2-level form
 (main/sub) and raw numbers are also accepted. 0/0/0, the broadcast address,
@@ -864,6 +918,19 @@ controller is set up at boot and stays idle, with the radio silent, until
   UUIDs and the name do not fit one packet. `nus off` drops the central
   unless the knixx service keeps the board advertising and the central is
   bonded.
+- **The radio.** The controller supports 2M, the PHY update a central asks
+  for and data length extension; the board asks for 251-byte packets on
+  connecting. Its default TX power comes from `ble.tx_power` at boot, and
+  a change goes to the advertising and the connection with Nordic's vendor
+  command, on the fly. A task reads the link's RSSI and TX power every 2 s
+  for `ble link` (and for the knixx service's `rssi`).
+- **Coded PHY** (`coded-phy`) needs the controller's multirole library,
+  which has extended advertising and the coded PHY. The controller holds to
+  legacy or extended advertising commands from the first it gets, so this
+  build advertises its 1M set (a legacy PDU) through the extended commands
+  too, next to the coded set. The controller keeps a peripheral link for
+  each connectable set it advertises, so it has two; the board serves one
+  central and stops the other set once one connects.
 - **Pairing** is trouble's LE Secure Connections, with the P-256 code for
   the Cortex-M4. The check of `ble.pair` is made at run time rather than
   with the GATT table's permissions, so that it can change without a

@@ -9,7 +9,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use btleplug::api::{Characteristic, Peripheral as _, WriteType};
 use btleplug::platform::Peripheral;
 use futures_util::StreamExt;
-use knixx_host::usbserial::{self, APP_PID, APP_VID};
+use knixx_host::usbserial::{self, APP_IDS};
 use serialport::TTYPort;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
@@ -65,7 +65,7 @@ impl Client {
         if let Some(port) = &t.port {
             return Client::usb(port);
         }
-        let port = match usbserial::ports(APP_VID, APP_PID).as_slice() {
+        let port = match usbserial::ports(&APP_IDS).as_slice() {
             [p] => p.clone(),
             [] => {
                 eprintln!("no knixx board on USB, trying BLE");

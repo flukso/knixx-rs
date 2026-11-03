@@ -158,7 +158,7 @@ fn main() -> Result<()> {
     let name = match args.port {
         Some(p) => p,
         None => {
-            let ports = usbserial::ports(FTDI_VID, FTDI_PID);
+            let ports = usbserial::ports(&[(FTDI_VID, FTDI_PID)]);
             match ports.as_slice() {
                 [p] => p.clone(),
                 [] => bail!("no FTDI adapter (0403:6001) on USB; use --port"),

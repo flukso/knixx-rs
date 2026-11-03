@@ -1,6 +1,8 @@
-//! The USB CDC serial port of the console, with the USB IDs and strings of
-//! the TinyGo firmware, so that host tools find the board as before
-//! (239A:802A, /dev/cu.usbmodem* on macOS: no serial number).
+//! The USB CDC serial port of the console. The board presents itself as
+//! knixx's own device, pid.codes 1209:A7EA, with the chip's device ID as
+//! its serial number, so that hosts can tell boards apart (Linux names it
+//! in /dev/serial/by-id). The firmware before 0.5 used the Feather's
+//! 239A:802A, which the host tools still accept.
 //!
 //! Output goes to OUT, a queue that writers fill without waiting: a write
 //! that does not fit is dropped whole, and the sender notes the loss once it
@@ -45,6 +47,25 @@ pub static SESSIONS: AtomicU32 = AtomicU32::new(0);
 /// The largest USB packet of the CDC data endpoints.
 const PACKET: usize = 64;
 
+/// The USB ID: knixx's own, from pid.codes.
+const VID: u16 = 0x1209;
+const PID: u16 = 0xA7EA;
+
+/// The serial number: the 64-bit FICR device ID in hex, as the BLE address
+/// is made of it too (see ble).
+fn serial_number() -> &'static str {
+    static SERIAL: StaticCell<[u8; 16]> = StaticCell::new();
+    let ficr = embassy_nrf::pac::FICR;
+    let id = (u64::from(ficr.deviceid(1).read()) << 32) | u64::from(ficr.deviceid(0).read());
+    let buf = SERIAL.init([0; 16]);
+    for (i, b) in buf.iter_mut().enumerate() {
+        let nibble = (id >> (60 - 4 * i)) & 0xf;
+        *b = b"0123456789ABCDEF"[nibble as usize];
+    }
+    // Hex digits only: valid UTF-8.
+    core::str::from_utf8(buf).unwrap_or("0")
+}
+
 /// Queues raw bytes for the host, whole or not at all.
 pub fn write(b: &[u8]) {
     OUT.lock(|q| q.borrow_mut().write(b));
@@ -72,10 +93,10 @@ pub fn start(
 ) {
     let driver = Driver::new(usbd, irqs, HardwareVbusDetect::new(irqs));
 
-    let mut config = embassy_usb::Config::new(0x239A, 0x802A);
-    config.manufacturer = Some("Adafruit Industries LLC");
-    config.product = Some("Feather nRF52840 Express");
-    config.serial_number = None;
+    let mut config = embassy_usb::Config::new(VID, PID);
+    config.manufacturer = Some("flukso");
+    config.product = Some("knixx thunder");
+    config.serial_number = Some(serial_number());
     config.max_power = 100;
     config.max_packet_size_0 = 64;
 

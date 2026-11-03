@@ -96,7 +96,7 @@ pub fn uf2(o: Options) -> Result<(), String> {
 
 /// Returns the serial port of the one knixx board on USB.
 pub fn app_port(hint: &str) -> Result<String, String> {
-    let ports = usbserial::ports(usbserial::APP_VID, usbserial::APP_PID);
+    let ports = usbserial::ports(&usbserial::APP_IDS);
     match ports.len() {
         0 => Err(format!("no knixx board on USB; {hint}")),
         1 => Ok(ports.into_iter().next().unwrap()),
@@ -150,7 +150,7 @@ fn wait_version(port: Option<&str>, wait: Duration) -> Result<String, String> {
         let p = match port {
             Some(p) if Path::new(p).exists() => p.to_string(),
             _ => {
-                let ports = usbserial::ports(usbserial::APP_VID, usbserial::APP_PID);
+                let ports = usbserial::ports(&usbserial::APP_IDS);
                 if ports.len() != 1 {
                     last = format!("waiting for the board's serial port ({} found)", ports.len());
                     continue;

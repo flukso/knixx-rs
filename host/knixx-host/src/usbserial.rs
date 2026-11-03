@@ -8,9 +8,10 @@ use std::path::Path;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
-/// The USB ID of the knixx firmware (as of the TinyGo firmware's).
-pub const APP_VID: u16 = 0x239A;
-pub const APP_PID: u16 = 0x802A;
+/// The USB IDs of the knixx firmware: its own, pid.codes 1209:A7EA, and
+/// the Feather's 239A:802A, which the firmware before 0.5 and the TinyGo
+/// firmware use.
+pub const APP_IDS: [(u16, u16); 2] = [(0x1209, 0xA7EA), (0x239A, 0x802A)];
 
 /// An error on the serial port.
 #[derive(Debug, thiserror::Error)]
@@ -21,17 +22,18 @@ pub enum Error {
     Io(String, std::io::Error),
 }
 
-/// Returns the serial ports of the USB devices with ID vid:pid.
-pub fn ports(vid: u16, pid: u16) -> Vec<String> {
+/// Returns the serial ports of the USB devices with one of the IDs
+/// (vid, pid).
+pub fn ports(ids: &[(u16, u16)]) -> Vec<String> {
     if cfg!(target_os = "linux") {
-        return sysfs_ports(Path::new("/"), vid, pid);
+        return sysfs_ports(Path::new("/"), ids);
     }
     let Ok(all) = serialport::available_ports() else {
         return Vec::new();
     };
     let mut out: Vec<String> = all
         .into_iter()
-        .filter(|p| matches!(&p.port_type, serialport::SerialPortType::UsbPort(u) if u.vid == vid && u.pid == pid))
+        .filter(|p| matches!(&p.port_type, serialport::SerialPortType::UsbPort(u) if ids.contains(&(u.vid, u.pid))))
         // macOS lists each port twice; cu.* is the one to open.
         .filter(|p| !p.port_name.starts_with("/dev/tty."))
         .map(|p| p.port_name)
@@ -42,7 +44,7 @@ pub fn ports(vid: u16, pid: u16) -> Vec<String> {
 
 /// Returns the /dev/ttyACM* ports under root whose USB device has ID
 /// vid:pid, from sysfs.
-pub fn sysfs_ports(root: &Path, vid: u16, pid: u16) -> Vec<String> {
+pub fn sysfs_ports(root: &Path, ids: &[(u16, u16)]) -> Vec<String> {
     let class = root.join("sys/class/tty");
     let Ok(entries) = fs::read_dir(&class) else {
         return Vec::new();
@@ -62,7 +64,9 @@ pub fn sysfs_ports(root: &Path, vid: u16, pid: u16) -> Vec<String> {
             continue;
         };
         let hex = |s: &str| u16::from_str_radix(s.trim(), 16).ok();
-        if hex(&v) == Some(vid) && hex(&p) == Some(pid) {
+        if let (Some(v), Some(p)) = (hex(&v), hex(&p))
+            && ids.contains(&(v, p))
+        {
             out.push(format!("/dev/{name}"));
         }
     }
@@ -174,13 +178,15 @@ mod tests {
             ("ttyACM0", dev("1-1", "239a", "802A")),
             ("ttyACM1", dev("1-2", "1234", "5678")),
             ("ttyS0", dev("1-3", "239a", "802a")),
+            ("ttyACM2", dev("1-4", "1209", "a7ea")),
+            ("ttyACM3", dev("1-5", "1209", "a7eb")),
         ] {
             fs::create_dir_all(tty.join(name)).unwrap();
             symlink(&intf, tty.join(name).join("device")).unwrap();
         }
         assert_eq!(
-            sysfs_ports(&root, APP_VID, APP_PID),
-            vec!["/dev/ttyACM0".to_string()]
+            sysfs_ports(&root, &APP_IDS),
+            vec!["/dev/ttyACM0".to_string(), "/dev/ttyACM2".to_string()]
         );
         fs::remove_dir_all(&root).unwrap();
     }

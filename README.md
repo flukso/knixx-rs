@@ -109,7 +109,13 @@ The firmware and the host tools build on macOS and Linux.
   through BlueZ, with `bluetoothd` running. The firmware build, `cargo
   xtask build`, does without.
 - On Linux, access to `/dev/ttyACM*` (the `dialout` group), for flashing
-  and the console over USB.
+  and the console over USB. ModemManager probes new serial devices, which
+  disturbs the console; a udev rule keeps it away from the board, in
+  `/etc/udev/rules.d/99-knixx.rules`:
+
+  ```
+  ATTRS{idVendor}=="1209", ATTRS{idProduct}=="a7ea", ENV{ID_MM_DEVICE_IGNORE}="1"
+  ```
 - Optional: [cargo-deny](https://github.com/EmbarkStudios/cargo-deny), for
   `cargo deny check` (licenses: permissive ones and MPL-2.0 only, see
   [Third-party code](#third-party-code)), and
@@ -234,8 +240,11 @@ builds the firmware and flashes it with `bolt uf2`:
    expected and not trusted either way: the flash passes once the board's
    `version` command prints the build just made.
 
-It finds the board by its USB ID, 239A:802A; on macOS the port is the one
-`/dev/cu.usbmodem*`, or `--port` when there are several. `bolt uf2 [file]`
+It finds the board by its USB ID: knixx's own, 1209:A7EA from
+[pid.codes](https://pid.codes), or 239A:802A, the Feather's, which the
+firmware before 0.5 and the Go firmware use. The board shows as "knixx
+thunder" by "flukso", with its device ID as serial number. On macOS the port
+is the one `/dev/cu.usbmodem*`, or `--port` when there are several. `bolt uf2 [file]`
 does the same for a given UF2 file, with `--expect` for the version line.
 
 macOS must allow the terminal to write to removable volumes (System

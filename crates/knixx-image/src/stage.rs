@@ -291,7 +291,7 @@ pub fn frame(offset: u32, data: &[u8], out: &mut [u8]) -> usize {
 /// The frames of an upload as they arrive: the chunks of a file of size
 /// bytes, each [offset][crc][data], one at a time, the host waiting for the
 /// answer to each. A link that loses or damages a packet now and then (USB
-/// on a busy board does) costs a resend, not the upload.
+/// through a hub has done so) costs a resend, not the upload.
 pub struct Frames {
     size: u32,
     chunk: u32,

@@ -370,9 +370,9 @@ bolt fw install | status
   `ready <chunk>`: 4 KiB on USB, 2 KiB on BLE.
 - **Framing:** the host sends each chunk as a frame, its offset and a CRC-32
   before the data, and waits for `ok <offset>`. A damaged frame gets
-  `resend <offset>`, and a frame without an answer is sent again: a busy
-  board loses a USB packet now and then, and this costs a frame, not the
-  upload.
+  `resend <offset>`, and a frame without an answer is sent again: a USB
+  link, such as one through a hub or adapter, can lose or damage a packet
+  now and then, and this costs a frame, not the upload.
 - **Checks:** the header is checked as soon as it is in: the size (at most
   1 MiB, with 64 KiB to spare on the littlefs, so that an image can't crowd
   out the configuration, the scripts and the bonds), the key, and the

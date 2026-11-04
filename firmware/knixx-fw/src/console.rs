@@ -585,9 +585,9 @@ impl Console {
             fw::Fed::Failed(e) => writeln!(Out, "error: {e}"),
             _ => Ok(()),
         };
-        // A frame the host sent again meanwhile is not a command; short, so
-        // that the next session's first key gets through.
-        self.drop_until = Some(now() + core::time::Duration::from_millis(150));
+        // A frame the host sent again meanwhile is not a command: binary
+        // input is dropped for a moment.
+        self.drop_until = Some(now() + core::time::Duration::from_millis(500));
         Echo.write(PROMPT.as_bytes());
     }
 
@@ -636,10 +636,16 @@ impl Console {
     /// same packet is dropped: the host waits for ready.
     async fn input(&mut self, data: &[u8]) {
         if let Some(t) = self.drop_until {
-            if now() < t {
+            // A stray frame holds binary bytes; a command does not.
+            let binary = data
+                .iter()
+                .any(|&b| !(b.is_ascii_graphic() || matches!(b, b' ' | b'\r' | b'\n' | b'\t')));
+            if now() < t && binary {
                 return;
             }
-            self.drop_until = None;
+            if now() >= t {
+                self.drop_until = None;
+            }
         }
         if self.fw.is_some() {
             if self.finish_at.is_none() {

@@ -10,4 +10,5 @@ publish = false
 # Without BLE, so that building the firmware needs no D-Bus on Linux; the
 # cycle task runs bolt scan instead.
 knixx-host = { path = "../host/knixx-host", default-features = false }
+knixx-image = { path = "../crates/knixx-image" }
 anyhow = "1"

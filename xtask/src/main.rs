@@ -1,18 +1,20 @@
 //! cargo xtask <task>: the build and flash tasks of knixx-rs.
 //!
-//!     build   build the firmware, every feature in, and write
-//!             build/thunder.{elf,uf2,hex} and the DFU package
-//!             build/thunder-dfu.zip
-//!     flash   build, flash over USB and check the board runs the build
-//!     ota     build, then send the DFU package over BLE with bolt ota
-//!     term    a terminal on the board's console with bolt term
-//!     cycle   build, then flash n times, checking USB and BLE after each
-//!     golden  record the VL53L7CX golden log with ST's C driver
-//!     genfw   extract the VL53L7CX firmware from ST's vl53l7cx_buffers.h
-//!     cad     the renders and the front plate, with the Python tools in cad/
+//!     build        build the bootloader and the firmware, every feature in,
+//!                  and write build/thunder.{elf,kfw,hex} and
+//!                  build/thunder-boot.{elf,hex}
+//!     flash        build, flash over USB through the bootloader's recovery
+//!                  and check the board runs the build
+//!     flash-probe  build, write the bootloader and the firmware over SWD
+//!     term         a terminal on the board's console with bolt term
+//!     cycle        build, then flash n times, checking USB and BLE after each
+//!     golden       record the VL53L7CX golden log with ST's C driver
+//!     genfw        extract the VL53L7CX firmware from ST's vl53l7cx_buffers.h
+//!     cad          the renders and the front plate, with the Python tools in cad/
 //!
-//! The firmware is built in firmware/, a workspace of its own for the
-//! nRF52840, stamped with the git commit and the build time.
+//! The firmware and the bootloader are built in firmware/, a workspace of
+//! its own for the nRF52840, stamped with the git commit and the build
+//! time, and with the public keys they take signed images from.
 
 mod cad;
 
@@ -23,36 +25,37 @@ use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use knixx_host::image::{Image, Ram};
-use knixx_host::legacydfu::{InitPacket, Package, read_hex};
+use knixx_host::flash;
+use knixx_host::image::{Image, Ram, Stamp};
+use knixx_host::sign;
 use knixx_host::time::utc;
-use knixx_host::{flash, uf2};
+use knixx_image as kimage;
 
-/// Where the application may go: from the end of the S140 6.1.1 SoftDevice
-/// to the start of the user data that precedes the bootloader.
-const APP_START: u32 = 0x26000;
-const APP_END: u32 = 0xED000;
-
-/// The name of the firmware's files in build/: thunder.uf2 and the others.
+/// The name of the firmware's files in build/: thunder.kfw and the others,
+/// and thunder-boot.* for the bootloader.
 const ARTIFACT: &str = "thunder";
+
+/// The default serial port of the SWD probe, a GDB server.
+const PROBE: &str = "/dev/cu.usbmodemB5C8A6F11";
 
 const USAGE: &str = "usage: cargo xtask <task>
 
 tasks:
-  build   build the firmware, every feature in, and write
-          build/thunder.{elf,uf2,hex} and the DFU package
-          build/thunder-dfu.zip; flags leave features out: [--no-scripts:
-          without Rhai Grain and its heap, so that no allocator is linked]
-          [--no-web-ble: without the knixx GATT service for the web app]
-          [--no-coded-phy: without advertising and connections on the LE
-          Coded PHY]
-  flash   build, flash over USB and check the board runs the build
-          [--port <serial port>] [--no-scripts] [--no-web-ble]
-          [--no-coded-phy]
-  ota     build, then send build/thunder-dfu.zip over BLE to a board in BLE
-          DFU mode (run ota on its console) [--no-scripts] [--no-web-ble]
-          [--no-coded-phy]
-          [bolt ota flags, e.g. --addr]
+  build   build the bootloader and the firmware, every feature in, and
+          write build/thunder.{elf,kfw,hex} and build/thunder-boot.{elf,hex};
+          flags leave features out: [--no-scripts: without Rhai Grain and
+          its heap, so that no allocator is linked] [--no-web-ble: without
+          the knixx GATT service for the web app] [--no-coded-phy: without
+          advertising and connections on the LE Coded PHY]. The image is
+          signed with $KNIXX_SIGNING_KEY, else the developer's key
+          (~/.config/knixx/dev-signing.key, made on first use)
+  flash   build, flash over USB through the bootloader's recovery and check
+          the board runs the build [--port <serial port>] [--force: take a
+          counter not above the installed one] [the build's flags]
+  flash-probe
+          build, then write the bootloader and the firmware over SWD with
+          arm-none-eabi-gdb [--probe <GDB server port>, default
+          /dev/cu.usbmodemB5C8A6F11] [the build's flags]
   term    a terminal on the console, over USB or BLE [bolt term flags]
   golden  record crates/knixx-vl53l7cx/testdata/configure.golden with ST's
           C driver and the harness; --check only compares [$CC, default cc]
@@ -118,20 +121,11 @@ fn main() -> Result<()> {
             build_with(features).map(|_| ())
         }
         Some("flash") => flash(features, &rest),
+        Some("flash-probe") => flash_probe(features, &rest),
         Some("cycle") => cycle(features, &rest),
         Some("golden") => golden(&args[1..]),
         Some("genfw") => genfw(&args[1..]),
         Some("cad") => cad::run(&args[1..]),
-        Some("ota") => {
-            build_with(features)?;
-            let mut a = vec![
-                "ota".to_string(),
-                "--zip".into(),
-                format!("build/{ARTIFACT}-dfu.zip"),
-            ];
-            a.extend_from_slice(&rest);
-            bolt(&a)
-        }
         Some("web") => web(&rest),
         Some("term") => {
             let mut a = vec!["term".to_string()];
@@ -158,6 +152,11 @@ fn root() -> PathBuf {
 struct Version {
     commit: String,
     date: String,
+    /// The image's version counter: the commit's time, or the build's for
+    /// a build with changes, so that it goes up from build to build.
+    counter: u32,
+    /// The build time in seconds since 1970.
+    secs: u64,
 }
 
 impl Version {
@@ -175,51 +174,82 @@ impl Version {
         let mut commit = git(&["rev-parse", "--short", "HEAD"])
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
             .unwrap_or_else(|| "unknown".into());
-        if git(&["diff", "--quiet", "HEAD"]).is_none() && commit != "unknown" {
+        let dirty = git(&["diff", "--quiet", "HEAD"]).is_none() && commit != "unknown";
+        if dirty {
             commit.push_str("-dirty");
         }
         let secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let committed = git(&["log", "-1", "--format=%ct"])
+            .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<u64>().ok());
+        let counter = match committed {
+            Some(t) if !dirty => t,
+            _ => secs,
+        } as u32;
         Version {
             commit,
             date: utc(secs),
+            counter,
+            secs,
         }
     }
 }
 
-/// Builds the firmware and writes build/thunder.elf, .uf2 and .hex, and the
-/// DFU package build/thunder-dfu.zip. It fails when the image does not fit
-/// the application's flash, and on the heap rule: with scripts the
-/// allocator is the heap of Rhai Grain; without them no allocator may be
-/// linked.
-fn build_with(f: Features) -> Result<(PathBuf, Version)> {
-    let scripts = f.scripts;
-    let v = Version::now();
-    let mut cargo = Command::new(env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
-    cargo.args(["build", "--release"]);
-    if !f.all() {
-        cargo.arg("--no-default-features");
-        let features: Vec<&str> = [
-            (f.scripts, "scripts"),
-            (f.web_ble, "web-ble"),
-            (f.coded_phy, "coded-phy"),
-        ]
-        .into_iter()
-        .filter_map(|(on, name)| on.then_some(name))
-        .collect();
-        if !features.is_empty() {
-            cargo.args(["--features", &features.join(",")]);
-        }
-    }
-    let status = cargo
+/// What a build made.
+struct Built {
+    kfw: PathBuf,
+    v: Version,
+}
+
+/// Runs cargo build in firmware/ with args, stamped with v and the keys.
+fn cargo_firmware(args: &[&str], v: &Version, keys: &str) -> Result<()> {
+    let status = Command::new(env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
+        .arg("build")
+        .args(args)
         .current_dir(root().join("firmware"))
         .env("KNIXX_COMMIT", &v.commit)
         .env("KNIXX_BUILD_DATE", &v.date)
+        .env("KNIXX_KEYS", keys)
         .status()
         .context("run cargo build in firmware/")?;
     if !status.success() {
-        bail!("firmware build failed");
+        bail!("cargo build {} failed", args.join(" "));
     }
-    let elf = root().join("firmware/target/thumbv7em-none-eabihf/release/knixx-fw");
+    Ok(())
+}
+
+/// Builds the bootloader and the firmware. It writes build/thunder.elf, the
+/// signed build/thunder.kfw and build/thunder.hex (the header and the body
+/// as they lie in flash, for the probe), and build/thunder-boot.elf and
+/// .hex. It fails when an image does not fit its flash, and on the heap
+/// rule: with scripts the allocator is the heap of Rhai Grain; without them
+/// no allocator may be linked.
+fn build_with(f: Features) -> Result<Built> {
+    let scripts = f.scripts;
+    let v = Version::now();
+    let key = sign::signing_key().map_err(anyhow::Error::msg)?;
+    let keys = sign::keys_env(&root(), &key).map_err(anyhow::Error::msg)?;
+
+    let mut args = vec!["--release", "-p", "knixx-fw"];
+    let features: Vec<&str> = [
+        (f.scripts, "scripts"),
+        (f.web_ble, "web-ble"),
+        (f.coded_phy, "coded-phy"),
+    ]
+    .into_iter()
+    .filter_map(|(on, name)| on.then_some(name))
+    .collect();
+    let joined = features.join(",");
+    if !f.all() {
+        args.push("--no-default-features");
+        if !features.is_empty() {
+            args.extend(["--features", &joined]);
+        }
+    }
+    cargo_firmware(&args, &v, &keys)?;
+    cargo_firmware(&["--profile", "boot", "-p", "knixx-boot"], &v, &keys)?;
+
+    let target = root().join("firmware/target/thumbv7em-none-eabihf");
+    let elf = target.join("release/knixx-fw");
     let data = fs::read(&elf).with_context(|| elf.display().to_string())?;
     let img = Image::from_elf(&data)?;
     let ram = Ram::from_elf(&data)?;
@@ -229,34 +259,45 @@ fn build_with(f: Features) -> Result<(PathBuf, Version)> {
     if scripts && ram.heap == 0 {
         bail!("the firmware with scripts lacks its heap, KNIXX_HEAP");
     }
-    if img.start() < APP_START || img.end() > APP_END {
+    let stamp = Stamp {
+        counter: v.counter,
+        version: &v.commit,
+        built: v.secs,
+    };
+    let kfw = img.to_kfw(&stamp, &key)?;
+    let (flash_img, _) = Image::from_kfw(&kfw)?;
+
+    let boot_elf = target.join("boot/knixx-boot");
+    let boot_data = fs::read(&boot_elf).with_context(|| boot_elf.display().to_string())?;
+    let boot = Image::from_elf(&boot_data)?;
+    if boot.start() != kimage::BOOT_START || boot.end() > kimage::BOOT_START + kimage::BOOT_SIZE {
         bail!(
-            "image {:#x}..{:#x} is outside the application's flash {APP_START:#x}..{APP_END:#x}",
-            img.start(),
-            img.end()
+            "the bootloader {:#x}..{:#x} is outside its flash {:#x}..{:#x}",
+            boot.start(),
+            boot.end(),
+            kimage::BOOT_START,
+            kimage::BOOT_START + kimage::BOOT_SIZE
         );
     }
+
     let out = root().join("build");
     fs::create_dir_all(&out)?;
-    let uf2_file = out.join(format!("{ARTIFACT}.uf2"));
+    let kfw_file = out.join(format!("{ARTIFACT}.kfw"));
     fs::write(out.join(format!("{ARTIFACT}.elf")), &data)?;
-    fs::write(&uf2_file, img.to_uf2(uf2::FAMILY_NRF52840))?;
-    let hex = img.to_hex();
-    fs::write(out.join(format!("{ARTIFACT}.hex")), &hex)?;
-    // The package of bolt genpkg build/thunder.hex: from the hex file, whose
-    // image genpkg rounds up to a multiple of 4.
-    let ip = InitPacket::feather();
-    let (_, bin) = read_hex(&hex)?;
-    let mut zip = std::io::Cursor::new(Vec::new());
-    Package::new(bin, &ip).write_zip(&mut zip, ARTIFACT, &ip)?;
-    fs::write(out.join(format!("{ARTIFACT}-dfu.zip")), zip.into_inner())?;
-    let used = img.end() - APP_START;
+    fs::write(&kfw_file, &kfw)?;
+    fs::write(out.join(format!("{ARTIFACT}.hex")), flash_img.to_hex())?;
+    fs::write(out.join(format!("{ARTIFACT}-boot.elf")), &boot_data)?;
+    fs::write(out.join(format!("{ARTIFACT}-boot.hex")), boot.to_hex())?;
+
+    let used = img.end() - kimage::APP_START;
+    let app_size = kimage::MAX_BODY;
     eprintln!(
-        "build/{ARTIFACT}.uf2: version {} built {}, {used} of {} bytes of flash ({}%)",
+        "build/{ARTIFACT}.kfw: version {} built {}, counter {}, signed with key {}; {used} of {app_size} bytes of flash ({}%)",
         v.commit,
         v.date,
-        APP_END - APP_START,
-        used * 100 / (APP_END - APP_START)
+        v.counter,
+        key.id,
+        used * 100 / app_size
     );
     eprintln!(
         "RAM: {} bytes of statics, {} bytes of stack, {}",
@@ -268,7 +309,13 @@ fn build_with(f: Features) -> Result<(PathBuf, Version)> {
             "no allocator".to_string()
         }
     );
-    Ok((uf2_file, v))
+    let boot_used = boot.end() - kimage::BOOT_START;
+    eprintln!(
+        "build/{ARTIFACT}-boot.hex: {boot_used} of {} bytes of flash ({}%)",
+        kimage::BOOT_SIZE,
+        boot_used * 100 / kimage::BOOT_SIZE
+    );
+    Ok(Built { kfw: kfw_file, v })
 }
 
 /// Builds ST's VL53L7CX driver with the harness for the host, runs it
@@ -485,39 +532,172 @@ fn bolt(args: &[String]) -> Result<()> {
 /// Builds the firmware and flashes it over USB, then checks that the board
 /// reports the new version.
 fn flash(features: Features, args: &[String]) -> Result<()> {
-    let port = match args {
-        [] => None,
-        [flag, p] if flag == "--port" => Some(p.clone()),
-        _ => bail!("usage: cargo xtask flash [--port <serial port>]"),
-    };
-    let (uf2, v) = build_with(features)?;
-    flash::uf2(flash::Options {
-        file: &uf2,
+    let mut port = None;
+    let mut force = false;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--port" => port = Some(it.next().context("--port <serial port>")?.clone()),
+            "--force" => force = true,
+            _ => bail!("usage: cargo xtask flash [--port <serial port>] [--force]"),
+        }
+    }
+    let b = build_with(features)?;
+    flash::kfw(flash::Options {
+        file: &b.kfw,
         port,
-        volume: flash::VOLUME,
-        expect: Some(format!("version {} built {}", v.commit, v.date)),
+        force,
+        expect: Some(format!("version {} built {}", b.v.commit, b.v.date)),
         wait: Duration::from_secs(20),
     })
     .map_err(anyhow::Error::msg)
 }
 
+/// Builds the bootloader and the firmware and writes both over SWD, with
+/// arm-none-eabi-gdb and a probe that is a GDB server on a serial port. The
+/// QSPI flash, with the configuration, the scripts and the bonds, stays as
+/// it is.
+///
+/// The probe does not always erase a page before it writes it, so the pages
+/// are erased through the NVMC first, and both images are read back and
+/// compared with the build, and written again if they differ, up to
+/// PROBE_TRIES times. Only then is the board reset.
+fn flash_probe(features: Features, args: &[String]) -> Result<()> {
+    let probe = match args {
+        [] => PROBE.to_string(),
+        [flag, p] if flag == "--probe" => p.clone(),
+        _ => bail!("usage: cargo xtask flash-probe [--probe <GDB server port>]"),
+    };
+    let b = build_with(features)?;
+    let out = root().join("build");
+    let boot_elf = out.join(format!("{ARTIFACT}-boot.elf"));
+    let boot = Image::from_elf(&fs::read(&boot_elf)?)?;
+    let boot_bin = boot.to_bin();
+    let kfw = fs::read(&b.kfw)?;
+    let app_hex = out.join(format!("{ARTIFACT}.hex"));
+    let got_boot = out.join("probe-boot.bin");
+    let got_app = out.join("probe-app.bin");
+    // The probe does not erase reliably before it writes, so the pages of
+    // both images are erased through the NVMC first.
+    let mut script = String::from(
+        "set mem inaccessible-by-default off\n\
+         # Reset and halt before the bootloader runs: a running board has\n\
+         # its bootloader write-protected by ACL until a reset.\n\
+         set {int}0xE000EDFC = 0x01000001\n\
+         set {int}0xE000ED0C = 0x05FA0004\n\
+         set {int}0xE000EDFC = 0\n\
+         set {int}0x4001E504 = 2\n",
+    );
+    let page = kimage::FLASH_PAGE;
+    let ranges = [
+        (boot.start(), boot.end()),
+        (kimage::HEADER_ADDR, kimage::HEADER_ADDR + kfw.len() as u32),
+    ];
+    for (start, end) in ranges {
+        let mut a = start & !(page - 1);
+        while a < end {
+            script.push_str(&format!(
+                "set {{int}}0x4001E508 = {a:#x}\nwhile {{int}}0x4001E400 == 0\nend\n"
+            ));
+            a += page;
+        }
+    }
+    script.push_str("set {int}0x4001E504 = 0\n");
+    script.push_str(&format!(
+        "load {}\nload {}\n",
+        boot_elf.display(),
+        app_hex.display()
+    ));
+    script.push_str(&format!(
+        "dump binary memory {} {:#x} {:#x}\ndump binary memory {} {:#x} {:#x}\n",
+        got_boot.display(),
+        boot.start(),
+        boot.end(),
+        got_app.display(),
+        ranges[1].0,
+        ranges[1].1
+    ));
+    let script_file = out.join("flash-probe.gdb");
+    fs::write(&script_file, script)?;
+    for attempt in 1..=PROBE_TRIES {
+        gdb(&probe, &[format!("source {}", script_file.display())])?;
+        let bad: Vec<String> = [
+            (boot.start(), &boot_bin, &got_boot),
+            (kimage::HEADER_ADDR, &kfw, &got_app),
+        ]
+        .into_iter()
+        .flat_map(|(base, want, file)| {
+            let got = fs::read(file).unwrap_or_default();
+            bad_pages(base, want, &got)
+        })
+        .map(|p| format!("{p:#x}"))
+        .collect();
+        if bad.is_empty() {
+            gdb(&probe, &["kill".into()])?;
+            eprintln!(
+                "wrote and read back the bootloader and the firmware {} over SWD; the board resets",
+                b.v.commit
+            );
+            return Ok(());
+        }
+        eprintln!(
+            "attempt {attempt}: pages {} read back wrong; writing again",
+            bad.join(", ")
+        );
+    }
+    bail!("the probe did not write the images right in {PROBE_TRIES} attempts")
+}
+
+/// How often flash-probe writes the images before it gives up.
+const PROBE_TRIES: u32 = 3;
+
+/// The 4 KiB pages, by address from base, where got differs from want.
+fn bad_pages(base: u32, want: &[u8], got: &[u8]) -> Vec<u32> {
+    let mut pages: Vec<u32> = (0..want.len())
+        .filter(|&i| got.get(i) != Some(&want[i]))
+        .map(|i| (base + i as u32) & !(kimage::FLASH_PAGE - 1))
+        .collect();
+    pages.dedup();
+    pages
+}
+
+/// Runs arm-none-eabi-gdb on the probe: attaches to the target and runs the
+/// commands.
+fn gdb(probe: &str, cmds: &[String]) -> Result<()> {
+    let mut c = Command::new("arm-none-eabi-gdb");
+    c.args(["-nx", "--batch"])
+        .args(["-ex", &format!("target extended-remote {probe}")])
+        .args(["-ex", "monitor swdp_scan"])
+        .args(["-ex", "attach 1"]);
+    for cmd in cmds {
+        c.args(["-ex", cmd]);
+    }
+    let o = c.output().context("run arm-none-eabi-gdb")?;
+    let text = String::from_utf8_lossy(&o.stdout).into_owned() + &String::from_utf8_lossy(&o.stderr);
+    if !o.status.success() || text.contains("Error") {
+        bail!("arm-none-eabi-gdb failed:\n{text}");
+    }
+    Ok(())
+}
+
 /// Builds once, then flashes n times. After each flash the board must
 /// report the version over USB and advertise over BLE: every flash ends in
-/// the bootloader jumping to the application without a reset, the path on
-/// which USB and the BLE controller can hang (nrf-sdc issue #103).
+/// the bootloader booting the application, the path on which USB and the
+/// BLE controller can hang.
 fn cycle(features: Features, args: &[String]) -> Result<()> {
     let n: u32 = match args {
         [n] => n.parse().context("cycle count")?,
         _ => bail!("usage: cargo xtask cycle <n>"),
     };
-    let (uf2, v) = build_with(features)?;
-    let expect = format!("version {} built {}", v.commit, v.date);
+    let b = build_with(features)?;
+    let expect = format!("version {} built {}", b.v.commit, b.v.date);
     for i in 1..=n {
         eprintln!("--- cycle {i} of {n}");
-        flash::uf2(flash::Options {
-            file: &uf2,
+        flash::kfw(flash::Options {
+            file: &b.kfw,
             port: None,
-            volume: flash::VOLUME,
+            // The same image each time.
+            force: true,
             expect: Some(expect.clone()),
             wait: Duration::from_secs(20),
         })
@@ -546,7 +726,17 @@ fn cycle(features: Features, args: &[String]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{c_arrays, hex_bytes};
+    use super::{bad_pages, c_arrays, hex_bytes};
+
+    #[test]
+    fn pages_that_differ() {
+        let want = vec![1u8; 9000];
+        let mut got = want.clone();
+        got[5000] = 0;
+        got.truncate(8500);
+        assert_eq!(bad_pages(0x10000, &want, &got), vec![0x11000, 0x12000]);
+        assert!(bad_pages(0, &want, &want).is_empty());
+    }
 
     #[test]
     fn hex_literals() {

@@ -1,7 +1,7 @@
 [package]
 name = "knixx-host"
 version = "0.1.0"
-description = "Host-side support for knixx boards: firmware images and flashing"
+description = "Host-side support for knixx boards: signed firmware images and flashing"
 edition.workspace = true
 license.workspace = true
 
@@ -15,9 +15,7 @@ serialport = { version = "4", default-features = false }
 btleplug = { version = "0.13.5", optional = true }
 tokio = { version = "1.54.1", features = ["rt", "time", "macros"], optional = true }
 futures-util = { version = "0.3.34", optional = true }
-zip = { version = "9.1.2", default-features = false, features = ["deflate"] }
-serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.154"
+knixx-image = { path = "../../crates/knixx-image", features = ["sign"] }
 
 [features]
 default = ["ble"]

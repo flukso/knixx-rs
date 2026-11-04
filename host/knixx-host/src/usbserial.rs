@@ -8,10 +8,63 @@ use std::path::Path;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
-/// The USB IDs of the knixx firmware: its own, pid.codes 1209:A7EA, and
-/// the Feather's 239A:802A, which the firmware before 0.5 and the TinyGo
-/// firmware use.
-pub const APP_IDS: [(u16, u16); 2] = [(0x1209, 0xA7EA), (0x239A, 0x802A)];
+/// The USB ID of knixx thunder, pid.codes 1209:A7EA: the firmware and the
+/// bootloader alike, told apart by their product strings.
+pub const APP_IDS: [(u16, u16); 1] = [(0x1209, 0xA7EA)];
+
+/// The product string of the firmware.
+pub const PRODUCT_APP: &str = "knixx thunder";
+/// The product string of the bootloader's USB recovery.
+pub const PRODUCT_BOOT: &str = "knixx bootloader";
+
+/// What runs on a board's USB port.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    /// The firmware, with its console.
+    App,
+    /// The bootloader, waiting for an image.
+    Bootloader,
+}
+
+impl Kind {
+    fn of(product: Option<&str>) -> Kind {
+        match product.map(str::trim) {
+            Some(PRODUCT_BOOT) => Kind::Bootloader,
+            _ => Kind::App,
+        }
+    }
+}
+
+/// Returns the serial ports of knixx boards running kind.
+pub fn board_ports(kind: Kind) -> Vec<String> {
+    let mut out: Vec<String> = ports_with_product(&APP_IDS)
+        .into_iter()
+        .filter(|(_, product)| Kind::of(product.as_deref()) == kind)
+        .map(|(p, _)| p)
+        .collect();
+    out.sort();
+    out
+}
+
+/// Returns the serial ports of the USB devices with one of the IDs, with
+/// their product strings.
+pub fn ports_with_product(ids: &[(u16, u16)]) -> Vec<(String, Option<String>)> {
+    if cfg!(target_os = "linux") {
+        return sysfs_ports_with_product(Path::new("/"), ids);
+    }
+    let Ok(all) = serialport::available_ports() else {
+        return Vec::new();
+    };
+    all.into_iter()
+        .filter(|p| !p.port_name.starts_with("/dev/tty."))
+        .filter_map(|p| match p.port_type {
+            serialport::SerialPortType::UsbPort(u) if ids.contains(&(u.vid, u.pid)) => {
+                Some((p.port_name, u.product))
+            }
+            _ => None,
+        })
+        .collect()
+}
 
 /// An error on the serial port.
 #[derive(Debug, thiserror::Error)]
@@ -45,6 +98,14 @@ pub fn ports(ids: &[(u16, u16)]) -> Vec<String> {
 /// Returns the /dev/ttyACM* ports under root whose USB device has ID
 /// vid:pid, from sysfs.
 pub fn sysfs_ports(root: &Path, ids: &[(u16, u16)]) -> Vec<String> {
+    sysfs_ports_with_product(root, ids)
+        .into_iter()
+        .map(|(p, _)| p)
+        .collect()
+}
+
+/// As sysfs_ports, with the devices' product strings.
+pub fn sysfs_ports_with_product(root: &Path, ids: &[(u16, u16)]) -> Vec<(String, Option<String>)> {
     let class = root.join("sys/class/tty");
     let Ok(entries) = fs::read_dir(&class) else {
         return Vec::new();
@@ -67,7 +128,10 @@ pub fn sysfs_ports(root: &Path, ids: &[(u16, u16)]) -> Vec<String> {
         if let (Some(v), Some(p)) = (hex(&v), hex(&p))
             && ids.contains(&(v, p))
         {
-            out.push(format!("/dev/{name}"));
+            out.push((
+                format!("/dev/{name}"),
+                read("product").map(|s| s.trim().to_string()),
+            ));
         }
     }
     out.sort();
@@ -85,8 +149,8 @@ pub fn open(name: &str, baud: u32) -> Result<serialport::TTYPort, Error> {
         .map_err(|e| Error::Port(name.into(), e))
 }
 
-/// Opens port name at 1200 baud and drops DTR, which makes a board with an
-/// Arduino-style USB stack reset into its bootloader. It tries 3 times, 1 s
+/// Opens port name at 1200 baud and drops DTR, which makes the firmware
+/// reset into the bootloader's USB recovery. It tries 3 times, 1 s
 /// apart.
 pub fn reset_1200(name: &str) -> Result<(), Error> {
     let mut last = None;
@@ -170,6 +234,9 @@ mod tests {
             fs::create_dir_all(d.join("1-1:1.0")).unwrap();
             fs::write(d.join("idVendor"), format!("{vid}\n")).unwrap();
             fs::write(d.join("idProduct"), format!("{pid}\n")).unwrap();
+            if n == "1-6" {
+                fs::write(d.join("product"), "knixx bootloader\n").unwrap();
+            }
             d.join("1-1:1.0")
         };
         let tty = root.join("sys/class/tty");
@@ -180,13 +247,26 @@ mod tests {
             ("ttyS0", dev("1-3", "239a", "802a")),
             ("ttyACM2", dev("1-4", "1209", "a7ea")),
             ("ttyACM3", dev("1-5", "1209", "a7eb")),
+            ("ttyACM4", dev("1-6", "1209", "a7ea")),
         ] {
             fs::create_dir_all(tty.join(name)).unwrap();
             symlink(&intf, tty.join(name).join("device")).unwrap();
         }
+        // The Feather's 239A:802A is no longer a knixx board.
         assert_eq!(
             sysfs_ports(&root, &APP_IDS),
-            vec!["/dev/ttyACM0".to_string(), "/dev/ttyACM2".to_string()]
+            vec!["/dev/ttyACM2".to_string(), "/dev/ttyACM4".to_string()]
+        );
+        let kinds: Vec<_> = sysfs_ports_with_product(&root, &APP_IDS)
+            .into_iter()
+            .map(|(p, product)| (p, Kind::of(product.as_deref())))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                ("/dev/ttyACM2".to_string(), Kind::App),
+                ("/dev/ttyACM4".to_string(), Kind::Bootloader)
+            ]
         );
         fs::remove_dir_all(&root).unwrap();
     }

@@ -1,13 +1,15 @@
 //! A firmware image: the bytes that go to flash, by address, read from the
 //! loadable segments of an ELF file and written as a raw binary, Intel HEX
-//! or UF2.
+//! or a signed .kfw file (knixx_image).
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use object::{Object, ObjectSection, ObjectSymbol};
 
-use crate::uf2;
+use knixx_image::{self as kimage, HEADER_SIZE, Header};
+
+use crate::sign::SigningKey;
 
 /// An error reading or converting an image.
 #[derive(Debug, thiserror::Error)]
@@ -20,6 +22,22 @@ pub enum Error {
     Overlap(u64),
     #[error("address {0:#x} is beyond 32 bits")]
     Address(u64),
+    #[error("the image starts at {0:#x}, not at the application's {app:#x}", app = kimage::APP_START)]
+    Start(u32),
+    #[error("the image ends at {0:#x}, past the application's {end:#x}", end = kimage::APP_END)]
+    End(u32),
+    #[error("not a .kfw file: {0}")]
+    Kfw(String),
+}
+
+/// What a .kfw file's header says of its build.
+pub struct Stamp<'a> {
+    /// The version counter: only goes up from one image to the next.
+    pub counter: u32,
+    /// The version string, such as the git commit.
+    pub version: &'a str,
+    /// The build time in seconds since 1970.
+    pub built: u64,
 }
 
 /// The bytes of an image by address, in contiguous runs that do not touch.
@@ -145,24 +163,39 @@ impl Image {
         out
     }
 
-    /// Returns the image as UF2 for family, in 256-byte blocks aligned to 256
-    /// bytes. Only the 256-byte pages that hold image bytes are written; the
-    /// gaps within a page are 0xFF.
-    pub fn to_uf2(&self, family: u32) -> Vec<u8> {
-        let mut pages: BTreeMap<u32, [u8; uf2::PAYLOAD]> = BTreeMap::new();
-        for (a, d) in self.runs() {
-            for (i, &b) in d.iter().enumerate() {
-                let addr = a + i as u32;
-                let page = addr & !(uf2::PAYLOAD as u32 - 1);
-                pages.entry(page).or_insert([0xFF; uf2::PAYLOAD])[(addr - page) as usize] = b;
-            }
+    /// Returns the image as a signed .kfw file: the header and the body,
+    /// from APP_START, with 0xFF in the gaps.
+    pub fn to_kfw(&self, stamp: &Stamp, key: &SigningKey) -> Result<Vec<u8>, Error> {
+        if self.start() != kimage::APP_START {
+            return Err(Error::Start(self.start()));
         }
-        let n = pages.len() as u32;
-        let mut out = Vec::with_capacity(pages.len() * uf2::BLOCK_SIZE);
-        for (i, (addr, payload)) in pages.iter().enumerate() {
-            out.extend_from_slice(&uf2::block(*addr, payload, i as u32, n, family));
+        if self.end() > kimage::APP_END {
+            return Err(Error::End(self.end()));
         }
-        out
+        let body = self.to_bin();
+        let hdr = Header::new(&body, stamp.counter, stamp.version, stamp.built);
+        Ok(kimage::sign::kfw(hdr, &body, &key.seed, key.id))
+    }
+
+    /// Returns the image of a .kfw file as it lies in internal flash: the
+    /// header at HEADER_ADDR, the body after it. Its hex file is what a
+    /// probe writes.
+    pub fn from_kfw(kfw: &[u8]) -> Result<(Image, Header), Error> {
+        let raw: &[u8; HEADER_SIZE] = kfw
+            .get(..HEADER_SIZE)
+            .and_then(|h| h.try_into().ok())
+            .ok_or_else(|| Error::Kfw("shorter than a header".into()))?;
+        let hdr = Header::parse(raw).map_err(|e| Error::Kfw(e.to_string()))?;
+        if kfw.len() != hdr.file_size() as usize {
+            return Err(Error::Kfw(format!(
+                "{} bytes, the header says {}",
+                kfw.len(),
+                hdr.file_size()
+            )));
+        }
+        let mut img = Image::default();
+        img.add(u64::from(kimage::HEADER_ADDR), kfw)?;
+        Ok((img, hdr))
     }
 }
 
@@ -330,8 +363,8 @@ mod tests {
         let ram = Ram::from_elf(&data).unwrap();
         // An allocator only with the heap of Rhai Grain.
         assert!(!ram.allocator || ram.heap > 0, "{ram:?}");
-        // flip-link: the stack from the start of RAM, after the panic
-        // record, up to the statics.
+        // flip-link: the stack from the start of RAM, after the double
+        // tap's word and the panic record, up to the statics.
         assert_eq!(ram.stack.0, 0x2000_0108);
         assert_eq!(ram.stack.1, ram.statics.0);
         assert_eq!(ram.statics.1, 0x2004_0000);
@@ -387,19 +420,35 @@ mod tests {
     }
 
     #[test]
-    fn uf2_pages() {
+    fn kfw_round_trip() {
         let mut img = Image::default();
-        img.add(0x2_6000, &[0xAA; 300]).unwrap();
-        img.add(0x2_7010, &[0xBB]).unwrap();
-        let f = img.to_uf2(uf2::FAMILY_NRF52840);
-        assert_eq!(f.len(), 3 * uf2::BLOCK_SIZE);
-        uf2::check(&f, uf2::FAMILY_NRF52840).unwrap();
-        let blocks: Vec<_> = uf2::blocks(&f).collect();
-        assert_eq!(blocks[0].addr, 0x2_6000);
-        assert_eq!(blocks[1].addr, 0x2_6100);
-        assert_eq!(blocks[1].payload[43], 0xAA);
-        assert_eq!(blocks[1].payload[44], 0xFF);
-        assert_eq!(blocks[2].addr, 0x2_7000);
-        assert_eq!(blocks[2].payload[0x10], 0xBB);
+        img.add(u64::from(kimage::APP_START), &[1, 2, 3]).unwrap();
+        img.add(u64::from(kimage::APP_START) + 8, &[9]).unwrap();
+        let key = SigningKey { seed: [5; 32], id: 0 };
+        let stamp = Stamp {
+            counter: 7,
+            version: "abc",
+            built: 1,
+        };
+        let kfw = img.to_kfw(&stamp, &key).unwrap();
+        assert_eq!(kfw.len(), HEADER_SIZE + 9);
+        let (flash, hdr) = Image::from_kfw(&kfw).unwrap();
+        assert_eq!(hdr.counter, 7);
+        assert_eq!(flash.start(), kimage::HEADER_ADDR);
+        assert_eq!(
+            &flash.to_bin()[HEADER_SIZE..],
+            &[1, 2, 3, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 9]
+        );
+        // Verifies with the key.
+        let keys = [(0, key.public())];
+        let mut v =
+            kimage::Verifier::new(kfw[..HEADER_SIZE].try_into().unwrap(), kimage::Keys(&keys)).unwrap();
+        v.update(&kfw[HEADER_SIZE..]);
+        assert!(v.finish().is_ok());
+        // Not at APP_START.
+        let mut low = Image::default();
+        low.add(0x2_6000, &[1]).unwrap();
+        assert!(matches!(low.to_kfw(&stamp, &key), Err(Error::Start(0x2_6000))));
+        assert!(Image::from_kfw(&kfw[..HEADER_SIZE + 3]).is_err());
     }
 }

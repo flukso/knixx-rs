@@ -389,6 +389,42 @@ bolt fw install | status
 
 The board keeps working while it stages: only `fw install` resets it.
 
+### Over the fw GATT service, without pairing
+
+```
+fw window 10                      # on the board's console: an update window of 10 minutes
+bolt fw push [build/thunder.kfw] [--name knixx | --addr <address>]
+```
+
+The fw GATT service stages a signed image over BLE without pairing, for an
+update of many boards from one laptop that is paired with none of them.
+
+- **The window:** the service takes images only in an update window, which
+  `fw window <minutes>` opens (1 to 60) and `fw window off` shuts. `fw
+  status` shows the time left.
+  - While it is open, the board advertises, also without `nus on` or
+    `ble.knixx`.
+  - A central that connects then is not asked to pair: the signature, not
+    the link, keeps out an image that may not install. NUS and the knixx
+    service still take only a paired central.
+- **The protocol:**
+  - **ctrl** (write, notify): `begin` gives the size and the CRC-32.
+  - **data** (write without response): `[offset][bytes]`.
+  - The board takes data only at the offset it expects, and notifies an
+    `ack` every 4 KiB, or a `rewind` to the offset it wants. `bolt fw push`
+    keeps 16 KiB in flight, and goes back to the last ack when nothing
+    comes.
+  - At the end the board checks the image as `fw put` does, and notifies
+    `done` with its counter, or `error` with a code and a reason.
+- **Speed:** from a Mac, about 16 KiB/s, so the firmware takes 47 s; NUS
+  takes 2 minutes.
+- **A lost link** costs little: the board keeps what it has, and the next
+  `bolt fw push` of the same image goes on from there.
+- **Conflicts:** an image is staged by one link at a time. `fw put` on the
+  console and the fw service refuse each other.
+
+`fw install` on the console, or `bolt fw install`, then installs it.
+
 ## Console
 
 The USB serial port carries the console: the banner on the first key, then
@@ -427,7 +463,7 @@ pulled while a terminal was open, would stall every writer, the bus with
 | `nus [on\|off]` | show the BLE console state, move the console to BLE NUS or back to USB |
 | `ble [link \| forget all\|<address>]` | show the BLE settings and the bonded centrals, the active connection (`link`, see [Radio](#radio)), or forget bonds, see [Pairing](#pairing) |
 | `script [ls] \| info <name> \| rm <name> \| put <name> <size> <crc32>` | the scripts in `/scripts` with their state; what the board knows of one; remove one; `put` receives one, as `bolt script upload` sends it, see [Scripts](#scripts) |
-| `fw [status \| put <size> <crc32> \| install \| discard \| recovery]` | the firmware: what runs and what is staged; `put` stages an image, as `bolt fw put` sends it; `install` resets into the bootloader to install it; `discard` removes it; `recovery` resets into the bootloader's USB recovery, see [Flashing](#over-the-console-usb-or-ble) |
+| `fw [status \| put <size> <crc32> \| install \| discard \| window [<minutes> \| off] \| recovery]` | the firmware: what runs and what is staged; `put` stages an image, as `bolt fw put` sends it; `install` resets into the bootloader to install it; `discard` removes it; `window` opens the fw GATT service for an update without pairing; `recovery` resets into the bootloader's USB recovery, see [Flashing](#over-the-console-usb-or-ble) |
 | `version` | the commit and build time of the firmware, `version <commit> built <date>`, also shown in the banner |
 | `sys` | the uptime, the stack high-water mark, the heap in use and at most, the scripts running and the telegrams dropped for them, the bytes queued and lost on the USB and BLE console outputs, and whether a USB terminal is open (DTR) |
 

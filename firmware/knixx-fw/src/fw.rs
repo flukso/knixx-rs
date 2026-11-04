@@ -63,6 +63,14 @@ fn count(i: usize) {
 /// What the bootloader did on this boot, from GPREGRET2.
 pub static LAST_RESULT: AtomicU8 = AtomicU8::new(0);
 
+/// Whether an fw put runs on the console.
+static CONSOLE_BUSY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Whether an fw put runs on the console: the fw service then takes none.
+pub fn console_busy() -> bool {
+    CONSOLE_BUSY.load(Ordering::Relaxed)
+}
+
 /// The fw put that the command asked for, which the console starts.
 static PENDING: Mutex<ThreadModeRawMutex, Cell<Option<(u32, u32)>>> = Mutex::new(Cell::new(None));
 
@@ -81,7 +89,8 @@ pub fn tidy() {
     }
 }
 
-const USAGE: &str = "usage: fw [status | put <size> <crc32> | install | discard | recovery]";
+const USAGE: &str =
+    "usage: fw [status | put <size> <crc32> | install | discard | window [<minutes> | off] | recovery]";
 
 pub fn command(_: &mut Ctx, args: &[&str], w: &mut dyn Write) -> Action {
     match args {
@@ -94,6 +103,23 @@ pub fn command(_: &mut Ctx, args: &[&str], w: &mut dyn Write) -> Action {
             }
             Err(e) => {
                 let _ = writeln!(w, "fw: {e}");
+            }
+        },
+        ["window"] => window_status(w),
+        ["window", "off"] => {
+            crate::fw_gatt::set_window(None);
+            let _ = writeln!(w, "fw: update window shut");
+        }
+        ["window", m] => match m.parse::<u64>() {
+            Ok(m @ 1..=60) => {
+                crate::fw_gatt::set_window(Some(embassy_time::Duration::from_secs(m * 60)));
+                let _ = writeln!(
+                    w,
+                    "fw: update window open for {m} min: the fw service takes a signed image, without pairing"
+                );
+            }
+            _ => {
+                let _ = writeln!(w, "fw: window takes 1 to 60 minutes, or off");
             }
         },
         ["recovery"] => {
@@ -118,6 +144,17 @@ fn describe(h: &Header, w: &mut dyn Write) {
     );
 }
 
+fn window_status(w: &mut dyn Write) {
+    match crate::fw_gatt::window_left() {
+        Some(d) => {
+            let _ = writeln!(w, "fw: update window open, {} s left", d.as_secs());
+        }
+        None => {
+            let _ = writeln!(w, "fw: update window shut");
+        }
+    }
+}
+
 fn status(w: &mut dyn Write) {
     let _ = write!(w, "fw: running ");
     match boot::header() {
@@ -133,6 +170,7 @@ fn status(w: &mut dyn Write) {
             let _ = writeln!(w, "none");
         }
     }
+    window_status(w);
     let last = LAST_RESULT.load(Ordering::Relaxed);
     let what = match last {
         result::NONE => return,
@@ -181,6 +219,16 @@ pub struct Upload {
     crc: u32,
     chunk: u32,
     last: Duration,
+    _busy: Busy,
+}
+
+/// Marks an fw put on the console for as long as it lives.
+struct Busy;
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        CONSOLE_BUSY.store(false, Ordering::Relaxed);
+    }
 }
 
 /// What feeding an upload brings: a line for the host.
@@ -197,13 +245,19 @@ pub enum Fed {
 impl Upload {
     /// Starts an fw put of size bytes with the given CRC-32, at now.
     pub fn begin(size: u32, crc: u32, chunk: usize, now: Duration) -> Result<Upload, StageError<FileError>> {
-        Ok(Upload {
+        if crate::fw_gatt::busy() {
+            return Err(StageError::Files(FileError::Busy));
+        }
+        let up = Upload {
             stager: Stager::begin(&mut Fs, size)?,
             frames: Frames::new(size, chunk),
             crc,
             chunk: chunk as u32,
             last: now,
-        })
+            _busy: Busy,
+        };
+        CONSOLE_BUSY.store(true, Ordering::Relaxed);
+        Ok(up)
     }
 
     pub fn chunk(&self) -> u32 {

@@ -22,7 +22,7 @@ use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
 use embassy_executor::Spawner;
 use embassy_futures::join::join;
-use embassy_futures::select::{Either, Either3, select, select3};
+use embassy_futures::select::{Either, Either3, Either4, select, select3, select4};
 use embassy_nrf::mode::Async;
 use embassy_nrf::rng::Rng;
 use embassy_sync::once_lock::OnceLock;
@@ -35,7 +35,7 @@ use trouble_host::prelude::*;
 
 #[cfg(feature = "web-ble")]
 use crate::knixx_gatt;
-use crate::{bonds, console, link, nus};
+use crate::{bonds, console, fw_gatt, link, nus};
 
 /// Outgoing and incoming L2CAP buffers per link.
 const L2CAP_TXQ: u8 = 3;
@@ -90,7 +90,7 @@ const NUS_UUID_LE: [u8; 16] = [
 
 /// The size of the attribute table: the services' attributes, and the GAP
 /// and GATT services that ble_task adds, Service Changed included.
-const ATTRIBUTES: usize = 40;
+const ATTRIBUTES: usize = 48;
 
 /// The GATT database as centrals see it: the Service Changed
 /// characteristic, and the hash of the database, which bonds keep.
@@ -105,6 +105,7 @@ static DB: OnceLock<Db> = OnceLock::new();
 #[gatt_server(attribute_table_size = ATTRIBUTES)]
 struct Server {
     nus: NusService,
+    fw: fw_gatt::FwService,
 }
 
 #[cfg(feature = "web-ble")]
@@ -112,6 +113,7 @@ struct Server {
 struct Server {
     nus: NusService,
     knixx: knixx_gatt::KnixxService,
+    fw: fw_gatt::FwService,
 }
 
 /// The Nordic UART Service: the central writes RX and is notified on TX.
@@ -265,15 +267,22 @@ async fn serve(
     let mut nus_on = false;
     let mut adv_failed = false;
     loop {
-        if !nus_on && !knixx_on() {
-            match select(nus::CONTROL.wait(), bonds::CHANGED.wait()).await {
-                Either::First(c) => {
+        if !nus_on && !knixx_on() && !fw_gatt::window_open() {
+            match select3(
+                nus::CONTROL.wait(),
+                bonds::CHANGED.wait(),
+                fw_gatt::window_change(),
+            )
+            .await
+            {
+                Either3::First(c) => {
                     nus_on = c;
                     if !nus_on {
                         nus::OFF_DONE.signal(());
                     }
                 }
-                Either::Second(()) => sync_bonds(stack),
+                Either3::Second(()) => sync_bonds(stack),
+                Either3::Third(()) => {}
             }
             continue;
         }
@@ -324,10 +333,20 @@ async fn serve(
                 .await;
             Ok::<_, BleHostError<_>>(conn)
         };
-        // The advertising stops as its future is dropped.
-        let conn = match select3(accept, nus::CONTROL.wait(), bonds::CHANGED.wait()).await {
-            Either3::First(Ok(conn)) => conn,
-            Either3::First(Err(e)) => {
+        // The advertising stops as its future is dropped; a window that
+        // closes stops it too, unless NUS or the knixx service keep it on.
+        let window_shut = async {
+            loop {
+                fw_gatt::window_change().await;
+                if !fw_gatt::window_open() && !nus_on && !knixx_on() {
+                    return;
+                }
+            }
+        };
+        let conn = match select4(accept, nus::CONTROL.wait(), bonds::CHANGED.wait(), window_shut).await {
+            Either4::Fourth(()) => continue,
+            Either4::First(Ok(conn)) => conn,
+            Either4::First(Err(e)) => {
                 // Said once, until advertising works again.
                 if !adv_failed {
                     adv_failed = true;
@@ -336,14 +355,14 @@ async fn serve(
                 Timer::after_secs(1).await;
                 continue;
             }
-            Either3::Second(c) => {
+            Either4::Second(c) => {
                 nus_on = c;
                 if !nus_on {
                     nus::OFF_DONE.signal(());
                 }
                 continue;
             }
-            Either3::Third(()) => {
+            Either4::Third(()) => {
                 sync_bonds(stack);
                 // New settings: a failure of theirs is news.
                 adv_failed = false;
@@ -367,10 +386,13 @@ async fn serve(
         let _ = conn.raw().set_bondable(console::pairing_window());
         if allowed(&conn) {
             nus::CONNECTED.store(true, Ordering::Relaxed);
-        } else {
-            // The central's OS pairs, or encrypts with its bond, at once.
+        } else if !fw_gatt::window_open() {
+            // The central's OS pairs, or encrypts with its bond, at once. In
+            // an update window it is not asked to: the fw service needs no
+            // pairing.
             let _ = conn.raw().request_security();
         }
+        fw_gatt::reset();
         #[cfg(feature = "web-ble")]
         knixx_gatt::reset();
         let mut first = true;
@@ -763,12 +785,13 @@ fn guarded(server: &Server, handle: u16) -> bool {
 /// feature.
 async fn knixx(server: &'static Server<'static>, conn: &Conn) {
     #[cfg(feature = "web-ble")]
-    knixx_gatt::serve(&server.knixx, conn).await;
+    select(
+        knixx_gatt::serve(&server.knixx, conn),
+        fw_gatt::serve(&server.fw, conn),
+    )
+    .await;
     #[cfg(not(feature = "web-ble"))]
-    {
-        let _ = (server, conn);
-        core::future::pending::<()>().await;
-    }
+    fw_gatt::serve(&server.fw, conn).await;
 }
 
 /// The handle a GATT request is for.
@@ -846,6 +869,16 @@ async fn events(stack: &'static Stack, server: &'static Server<'static>, conn: &
                         reply.send().await;
                     }
                     continue;
+                }
+                if let GattEvent::Write(w) = &event
+                    && w.handle() == server.fw.ctrl.handle
+                {
+                    w.with_data(|_, data| fw_gatt::ctrl(data));
+                }
+                if let GattEvent::Write(w) = &event
+                    && w.handle() == server.fw.data.handle
+                {
+                    w.with_data(|_, data| fw_gatt::data(data));
                 }
                 if let GattEvent::Write(w) = &event
                     && w.handle() == rx

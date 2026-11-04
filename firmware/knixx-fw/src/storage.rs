@@ -92,6 +92,8 @@ pub fn save(data: &[u8]) -> Result<(), SaveError> {
 pub enum FileError {
     /// The flash or its littlefs is not available.
     Unavailable,
+    /// The staged image is being written over the other link.
+    Busy,
     Fs(knixx_storage::FsError),
 }
 
@@ -99,6 +101,7 @@ impl fmt::Display for FileError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             FileError::Unavailable => f.write_str("flash unavailable"),
+            FileError::Busy => f.write_str("an image is being staged over BLE"),
             FileError::Fs(e) => write!(f, "{e}"),
         }
     }

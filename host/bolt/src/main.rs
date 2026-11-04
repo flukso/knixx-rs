@@ -13,6 +13,7 @@ mod ble;
 mod client;
 mod fw;
 mod input;
+mod push;
 mod script;
 mod term;
 
@@ -167,6 +168,22 @@ enum FwCmd {
         #[command(flatten)]
         board: Board,
     },
+    /// Push a .kfw file over the board's fw GATT service, in its update
+    /// window (run fw window <minutes> on its console), without pairing.
+    Push {
+        #[arg(default_value = "build/thunder.kfw")]
+        file: PathBuf,
+        /// The advertised name of the board.
+        #[arg(long, default_value = "knixx")]
+        name: String,
+        /// The BLE address of the board instead of the name: the MAC address
+        /// on Linux, the device UUID on macOS.
+        #[arg(long, default_value = "")]
+        addr: String,
+        /// How long to wait for the board, in seconds.
+        #[arg(long, default_value_t = 30)]
+        wait: u64,
+    },
     /// Install the staged image: the board resets into its bootloader.
     Install {
         #[command(flatten)]
@@ -246,6 +263,12 @@ fn main() -> Result<()> {
         Cmd::Fw { cmd } => match cmd {
             FwCmd::Put { file, install, board } => fw::put(&file, &board.target(), install),
             FwCmd::Install { board } => fw::install(&board.target()),
+            FwCmd::Push {
+                file,
+                name,
+                addr,
+                wait,
+            } => push::push(&file, &name, &addr, Duration::from_secs(wait)),
             FwCmd::Status { board } => fw::command("fw status", &board.target()),
         },
         Cmd::Script { cmd } => match cmd {

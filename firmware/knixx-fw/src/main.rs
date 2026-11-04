@@ -20,6 +20,7 @@ mod boot;
 mod bus;
 mod console;
 mod fw;
+mod fw_gatt;
 #[cfg(feature = "scripts")]
 mod heap;
 mod i2c;

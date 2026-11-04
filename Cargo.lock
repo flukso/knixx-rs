@@ -191,6 +191,7 @@ dependencies = [
  "futures-util",
  "knixx-console",
  "knixx-host",
+ "knixx-image",
  "knixx-script",
  "md-5",
  "serialport",

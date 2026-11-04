@@ -181,6 +181,25 @@ impl Client {
         }
     }
 
+    /// Reads the next line, as line does, or None when none comes within
+    /// wait.
+    pub async fn line_within(&mut self, wait: Duration) -> Result<Option<String>> {
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            if let Some(i) = self.text.find('\n') {
+                let rest = self.text.split_off(i + 1);
+                let l = std::mem::replace(&mut self.text, rest);
+                return Ok(Some(usbserial::strip(&l).trim_end().to_string()));
+            }
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            match timeout(left, self.incoming.recv()).await {
+                Ok(Some(b)) => self.text.push_str(&String::from_utf8_lossy(&b)),
+                Ok(None) => bail!("the board went away"),
+                Err(_) => return Ok(None),
+            }
+        }
+    }
+
     /// Reads the next line, without its line end and escape sequences.
     pub async fn line(&mut self, wait: Duration) -> Result<String> {
         let l = self.read_until("\n", wait).await?;
@@ -193,12 +212,23 @@ impl Client {
         if self.awake {
             return Ok(());
         }
-        self.write(b"\r").await?;
-        self.read_until(PROMPT, Duration::from_secs(5))
-            .await
-            .map_err(|e| anyhow!("{e}: is the console on this link? (nus on moves it to BLE)"))?;
-        self.awake = true;
-        Ok(())
+        // A line end now and then: on USB a packet can get stuck in the
+        // board until the next one arrives.
+        let mut last = None;
+        for _ in 0..4 {
+            self.write(b"\r").await?;
+            match self.read_until(PROMPT, Duration::from_millis(1500)).await {
+                Ok(_) => {
+                    self.awake = true;
+                    return Ok(());
+                }
+                Err(e) => last = Some(e),
+            }
+        }
+        let e = last.map(|e| e.to_string()).unwrap_or_default();
+        Err(anyhow!(
+            "{e}: is the console on this link? (nus on moves it to BLE)"
+        ))
     }
 
     /// Runs a command and returns its output, up to the next prompt, without

@@ -87,8 +87,9 @@ through an onsemi NCN5121 transceiver on UARTE0 at 38400 baud.
   host, compiled to Rhai Grain bytecode and uploaded with `bolt script`,
   see [Scripts](#scripts). Each gets every telegram on the bus and a call
   every second, keeps its state from call to call, and sends telegrams.
-- **Updates.** Over USB through the Feather's UF2 bootloader, or over BLE
-  through its DFU mode, see [Flashing](#flashing).
+- **Updates.** Signed images only. Over USB through the bootloader's
+  recovery, or staged over the console, on USB or BLE, while the firmware
+  runs and installed by the bootloader, see [Flashing](#flashing).
 
 ## Requirements
 
@@ -129,9 +130,10 @@ The firmware and the host tools build on macOS and Linux.
   `web/rust-toolchain.toml` adds the `wasm32-unknown-unknown` target.
 
 ```sh
-cargo xtask build    # build the firmware: build/thunder.{elf,uf2,hex}, build/thunder-dfu.zip; --no-scripts, --no-web-ble, --no-coded-phy
-cargo xtask flash    # build and flash over USB; --port picks the serial port; --no-scripts, --no-web-ble, --no-coded-phy
-cargo xtask ota      # build and flash over BLE (run ota on the console first); --addr picks a board
+cargo xtask build    # build the bootloader and the firmware: build/thunder.{elf,kfw,hex}, build/thunder-boot.{elf,hex}; --no-scripts, --no-web-ble, --no-coded-phy
+cargo xtask flash    # build and flash over USB through the bootloader's recovery; --port, --force
+cargo xtask fw       # build, stage the image over the console (USB, else BLE) and install it; --ble, --addr
+cargo xtask flash-probe  # build and write the bootloader and the firmware over SWD; --probe
 cargo xtask term     # a terminal on the console, on USB, else BLE; --usb, --ble, --port, --addr
 cargo xtask cycle N  # build, then flash N times, checking USB and BLE after each
 cargo xtask golden   # record the VL53L7CX golden log with ST's C driver; --check compares
@@ -148,16 +150,45 @@ bolt script upload <script>  # build <script>.rhai and run it on the board; see 
 cargo xtask build
 ```
 
-builds the firmware, stamped with the git commit (with `-dirty` when
-tracked files differ from it) and the build time in UTC, and writes
-`build/thunder.elf`, `build/thunder.uf2`, `build/thunder.hex` and the DFU
-package `build/thunder-dfu.zip`. It reports the flash and RAM the firmware
-takes, and fails when the image does not fit `0x26000`–`0xED000`, or on the
-heap rule below.
+builds the bootloader and the firmware, stamped with the git commit (with
+`-dirty` when tracked files differ from it) and the build time in UTC, and
+writes:
+
+| file | what |
+|---|---|
+| `build/thunder.kfw` | the firmware image, signed: what `bolt flash` and `bolt fw put` send |
+| `build/thunder.elf` | the firmware with its symbols |
+| `build/thunder.hex` | the image's header and the firmware as they lie in flash, for a probe |
+| `build/thunder-boot.elf`, `.hex` | the bootloader |
+
+It reports the flash and RAM they take, and fails when an image does not
+fit its region (see [Flash layout](#flash-layout)), or on the heap rule
+below.
+
+**Signed images.** A `.kfw` file is a 256-byte header and the firmware. The
+header (`crates/knixx-image`) carries the magic `KNXX`, the firmware's
+length and CRC-32, a version counter, the version string, the build time,
+and an ed25519 signature over the header and the firmware. The bootloader
+and the firmware take only images signed with one of the keys they were
+built with, and only with a counter above the running firmware's: an image
+can't be faked, and an older one can't be put back, other than through USB
+recovery with `--force`.
+
+- **The version counter** is the commit's time, or the build's for a build
+  with changes, so that it goes up from build to build.
+- **The developer's key**, key 0, is made on the first build at
+  `~/.config/knixx/dev-signing.key`. Every build on that machine signs with
+  it and takes images signed with it.
+- **The release key**, key 1, signs the releases: the release workflow takes
+  its seed from the `KNIXX_SIGNING_KEY` secret. Its public half lies in
+  `keys/1-release.pub`, so that every build takes releases too.
+  `cargo xtask keygen 1 release <seed file>` makes it; keep the seed file
+  offline and store it as the secret. A second key, kept offline as a
+  backup, can go in as `keys/2-backup.pub` the same way.
 
 **One build, every feature in.** There is one firmware, thunder, and it has
 every feature: scripts, the knixx GATT service for the [web app](#web-app)
-and long-range BLE on the coded PHY. It takes 744 KB, 91% of the
+and long-range BLE on the coded PHY. It takes 774 KB, 79% of the
 application's flash. The config keys decide what runs: `ble.knixx` and
 `ble.coded` are off by default, so a board out of the box behaves as one
 without them until they are switched on. This is the build that CI checks
@@ -174,7 +205,7 @@ combine:
 
 With all three, the firmware takes 458 KB, of which BLE pairing (LE Secure
 Connections, with its P-256 code) is some 64 KB. `cargo xtask flash` and
-`ota` take the same flags. CI builds only the full firmware, so a build
+`fw` take the same flags. CI builds only the full firmware, so a build
 with flags is checked when someone makes it. `--web-ble` and `--coded-phy`,
 which added the features before 0.6, are refused.
 
@@ -200,24 +231,48 @@ lowest word that changed.
 
 `cd firmware && cargo bloat --release --crates` shows what takes the flash.
 
-**Flash layout.** The firmware keeps the Feather's stock layout: the MBR
-and the S140 6.1.1 SoftDevice below `0x26000` stay untouched and the
-SoftDevice is never enabled, so the Adafruit UF2 bootloader keeps flashing
-over USB and BLE.
+### Flash layout
 
-| Region | Range |
-|---|---|
-| MBR + S140 6.1.1 | `0x00000`–`0x26000` |
-| Application | `0x26000`–`0xED000` |
-| User data | `0xED000`–`0xF4000` |
-| UF2 bootloader | `0xF4000`– |
+The board runs its own bootloader (`firmware/knixx-boot`) in place of the
+Adafruit one, without the MBR and the S140 SoftDevice, which the firmware
+never used: its BLE stack is linked in. That gives the firmware 960 KiB of
+the 1 MB flash.
 
-The application links at `0x26000` (`firmware/knixx-fw/memory.x`) with
-`cortex-m-rt`'s `set-vtor`, so its vector table does not depend on the MBR's
-forwarding. Its RAM starts at `0x20000008`, after the MBR's 8 bytes, with
-the panic record: 256 bytes that the UF2 bootloader, whose RAM starts at
-`0x20008000` with its stack at the top, leaves alone across a reset. The
-stack starts after it, at `0x20000108`.
+| region | range | |
+|---|---|---|
+| bootloader | `0x00000`–`0x10000` | 64 KiB, write-protected while the firmware runs |
+| image header | `0x10000`–`0x10100` | the `.kfw` header, written last |
+| firmware | `0x10100`–`0x100000` | 959.75 KiB |
+
+- **The firmware** links at `0x10100` (`firmware/knixx-fw/memory.x`), with
+  `cortex-m-rt`'s `set-vtor`.
+- **RAM:** the bottom 8 bytes hold the bootloader's double-tap word, and the
+  next 256 bytes the firmware's panic record. The bootloader keeps clear of
+  both, so a panic's record survives the reset through it. The stack starts
+  after them, at `0x20000108`.
+- **The bootloader** decides, after a reset and before it touches any
+  peripheral, what to do:
+  - **Boot:** the header and the firmware's CRC are good. It
+    write-protects itself with an ACL region (until the next reset) and
+    jumps to the firmware.
+  - **Install:** the firmware asked for it (`fw install`), or the firmware
+    is not valid. It checks the staged image on the QSPI flash
+    (`/fw/update.kfw`) whole (size, header, CRC, signature, counter) before
+    it erases anything, copies it, checks the CRC of what it wrote and
+    writes the header last. A reset halfway leaves no valid firmware, so the
+    next boot copies again. GPREGRET2 tells the firmware the outcome, which
+    `fw status` shows.
+  - **Recovery:** the 1200-baud touch or `fw recovery`, a double tap of
+    reset, or no valid firmware and nothing to install. It waits for an
+    image over USB (`bolt flash`).
+- **The Feather's NeoPixel and red LED** show what it does, as the Adafruit
+  bootloader's did:
+
+  | state | NeoPixel | red LED breathes every |
+  |---|---|---|
+  | started, USB not connected | red | 300 ms |
+  | USB connected | green | 3 s |
+  | writing an image | red | 100 ms |
 
 ## Flashing
 
@@ -228,107 +283,111 @@ the firmware, so that a board can be flashed without building it:
 
 | file | what |
 |---|---|
-| `thunder.uf2` | the firmware, every feature in, for the UF2 bootloader's drive (USB) |
-| `thunder-dfu.zip` | the firmware as a DFU package (BLE) |
-| `thunder.hex`, `thunder.elf` | the firmware for a debug probe, and with its symbols |
+| `thunder.kfw` | the firmware, every feature in, signed with the release key: for `bolt flash` and `bolt fw put` |
+| `thunder.elf` | the firmware with its symbols |
+| `thunder-boot.hex`, `thunder-boot.elf` | the bootloader, for a probe |
 | `bolt-<tag>-<target>.tar.gz` | `bolt` for Linux (x86_64, aarch64) and Apple Silicon macOS |
 
-Double-tap reset to get the bootloader's `FTHR840BOOT` drive and copy a
-`thunder.uf2` onto it, or use `bolt uf2 thunder.uf2`. On macOS, a `bolt` downloaded
-with a browser is quarantined: `xattr -d com.apple.quarantine bolt` lets it
-run. A tag `v*` pushed to GitHub makes the release
-(`.github/workflows/release.yml`). Releases up to 0.5.1 carry three builds
-instead, as `knixx.*`, `knixx-web-ble.*` and `knixx-web-ble-coded.*`.
+`bolt flash thunder.kfw` flashes a board over USB. On macOS, a `bolt`
+downloaded with a browser is quarantined: `xattr -d com.apple.quarantine
+bolt` lets it run. A tag `v*` pushed to GitHub makes the release
+(`.github/workflows/release.yml`). Releases up to 0.6.0 are for the Adafruit
+bootloader (`thunder.uf2`, `knixx*.uf2`) and no longer fit a board that runs
+ours.
+
+### Moving a board to our bootloader
+
+A board with the Adafruit bootloader moves once, over SWD, with a debug
+probe that is a GDB server on a serial port (a Black Magic Probe) and
+`arm-none-eabi-gdb`:
+
+```
+cargo xtask flash-probe [--probe <port>]
+```
+
+- **What it does:** it builds both, resets the board and halts it before
+  its bootloader runs (the ACL write protection holds until a reset), and
+  erases and writes the bootloader and the firmware with its header.
+- **Checking:** the probe does not always erase a page before it writes it,
+  so `flash-probe` erases the pages through the NVMC itself. It reads both
+  images back and compares them with the build, and writes again if they
+  differ.
+- **The default port** is `/dev/cu.usbmodemB5C8A6F11`.
+- **What stays:** the QSPI flash, with the configuration, the scripts and
+  the bonds, is not touched by `flash-probe`. Back up the flash first:
+  `dump binary memory flash.bin 0 0x100000` in gdb keeps the Adafruit setup.
+
+The bootloader can only be changed over SWD: while the firmware runs it is
+write-protected, and nothing updates it.
 
 ### Over USB
 
 ```
-cargo xtask flash [--port <serial port>]
+cargo xtask flash [--port <serial port>] [--force]
 ```
 
-builds the firmware and flashes it with `bolt uf2`:
+builds the firmware and flashes it with `bolt flash`:
 
-1. It resets the running board into its UF2 bootloader with the 1200-baud
-   touch: it opens the board's serial port at 1200 baud and drops DTR. A
-   board already in its bootloader, after a double tap of reset, is flashed
-   as it is.
-2. It waits for the bootloader's `FTHR840BOOT` drive and copies the UF2
-   file to it. On Linux it asks udisks to mount the drive when no
-   automounter has, as the user at the machine (polkit).
-3. The bootloader resets the board as soon as it has the last block, while
-   the host may still write the drive's file entries, so a write error is
-   expected and not trusted either way: the flash passes once the board's
+1. It resets the running board into the bootloader's recovery with the
+   1200-baud touch: it opens the board's serial port at 1200 baud and drops
+   DTR. A board that waits in its bootloader already, after a double tap of
+   reset, is flashed as it is.
+2. It sends the `.kfw` file with `fw put` in chunks of 4 KiB, each acked
+   after the bootloader writes it to internal flash. The bootloader checks
+   the header's key and counter before it erases anything (`--force` takes
+   an image whose counter is not above the installed one), and the CRCs and
+   the signature at the end; it writes the header only then. About 30 s.
+3. It boots the new firmware, and the flash passes once the board's
    `version` command prints the build just made.
 
-It finds the board by its USB ID: knixx's own, 1209:A7EA from
-[pid.codes](https://pid.codes), or 239A:802A, the Feather's, which the
-firmware before 0.5 and the Go firmware use. The board shows as "knixx
-thunder" by "flukso", with its device ID as serial number. On macOS the port
-is the one `/dev/cu.usbmodem*`, or `--port` when there are several. `bolt uf2 [file]`
-does the same for a given UF2 file, with `--expect` for the version line.
-
-macOS must allow the terminal to write to removable volumes (System
-Settings, Privacy & Security, Files & Folders).
+It finds the board by its USB ID, 1209:A7EA from
+[pid.codes](https://pid.codes): "knixx thunder" for the firmware, "knixx
+bootloader" for its recovery, both by "flukso" with the chip's device ID as
+serial number. On macOS the port is the one `/dev/cu.usbmodem*`, or `--port`
+when there are several. `bolt flash [file]` does the same for a given
+`.kfw` file, with `--expect` for the version line.
 
 ```
 cargo xtask cycle <n>
 ```
 
 builds once, then flashes `n` times; after each flash the board must report
-its version over USB and advertise over BLE. Every flash ends with the
-bootloader jumping to the application without a reset, the path on which
-USB and the BLE controller can hang.
+its version over USB and advertise over BLE.
 
-### Over BLE
+### Over the console: USB or BLE
 
-1. Run `cargo xtask ota` on the host. It builds `build/thunder-dfu.zip` and
-   runs `bolt ota`, which waits up to 60 s for a bootloader in BLE DFU
-   mode.
-2. Type `ota` on the USB or the BLE console. The firmware writes 0xA8 to
-   GPREGRET and resets. The Adafruit bootloader then starts its BLE DFU
-   mode and advertises as `AdaDFU`.
-3. `bolt ota` connects and sends the package with the legacy Nordic DFU
-   protocol, with a receipt every 10 packets. The bootloader validates and
-   starts the new firmware.
+The firmware stages a new image while it runs, and the bootloader installs
+it:
 
-The packets carry as much as the negotiated ATT MTU allows, 244 bytes with
-the bootloader's MTU of 247, which sent a 364 KB image in about a minute
-(the firmware is about 744 KB);
-`bolt ota --chunk` sets another size. Phone apps that speak legacy DFU, such
-as nRF Connect or Bluefruit Connect, can also send `build/thunder-dfu.zip`.
+```
+cargo xtask fw [--ble] [--addr <address>]
+bolt fw put [build/thunder.kfw] [--install] [--ble] [--addr <address>]
+bolt fw install | status
+```
 
-`bolt genpkg <app.hex> <package.zip>` builds a DFU package as
-adafruit-nrfutil dfu genpkg does, with the init packet of the Feather's
-bootloader (device type 0x0052, SoftDevice id 0x00B6); the files in the zip
-are byte for byte those of the Go `bolt genpkg`.
+- **`fw put <size> <crc32>`** on the console takes the `.kfw` file into
+  `/fw/update.tmp` on the QSPI flash's littlefs. The board answers
+  `ready <chunk>`: 4 KiB on USB, 2 KiB on BLE.
+- **Framing:** the host sends each chunk as a frame, its offset and a CRC-32
+  before the data, and waits for `ok <offset>`. A damaged frame gets
+  `resend <offset>`, and a frame without an answer is sent again: a busy
+  board loses a USB packet now and then, and this costs a frame, not the
+  upload.
+- **Checks:** the header is checked as soon as it is in: the size (at most
+  1 MiB, with 64 KiB to spare on the littlefs, so that an image can't crowd
+  out the configuration, the scripts and the bonds), the key, and the
+  counter against the running firmware's. The signature and the CRC are
+  checked as the rest streams through, and the file is read back at the
+  end. Only then is it renamed to `/fw/update.kfw`: `done <size>`.
+- **`fw install`** resets into the bootloader, which installs it (about
+  25 s), and `fw status` then shows what runs, what is staged, and what the
+  bootloader did on the last boot. The firmware removes the staged file once
+  it runs it.
+- **Over BLE,** `fw put` takes a paired central (`ble.pair`) and `nus on`,
+  as the console does.
+- **Over USB** it stages at about 27 KiB/s, so 30 s for the firmware.
 
-Caveats:
-- `ota` resets the board: a telegram in flight is lost and the occupancy
-  state is cleared.
-- The bootloader stays in DFU mode until it gets an update or a reset.
-- `bolt ota` takes the first `AdaDFU` it sees. With several boards in DFU
-  mode, use `--addr`. The bootloader advertises with the board's address
-  plus one in the last byte.
-- On macOS, `--addr` is the UUID that macOS gives the bootloader, which
-  differs from the board's own UUID; `bolt ota` prints it when it connects.
-  The first run asks to give the terminal app access to Bluetooth.
-- The bootloader runs the radio on its RC oscillator. With BlueZ's default
-  connection parameters (30-50 ms, 420 ms supervision timeout) an Intel AX200
-  never establishes the link (`le-connection-abort-by-local`), and the
-  bootloader stops advertising after the failed attempt, so `ota` must be run
-  again. Connecting at 15-30 ms with a 2 s timeout works. Set it until the next
-  reboot with
-
-  ```sh
-  cd /sys/kernel/debug/bluetooth/hci0
-  echo 24 | sudo tee conn_max_interval && echo 12 | sudo tee conn_min_interval
-  echo 200 | sudo tee supervision_timeout
-  bluetoothctl remove <AdaDFU address>   # drop the parameters kept for it
-  ```
-
-  or for good in `/etc/bluetooth/main.conf` under `[LE]`
-  (`MinConnectionInterval=12`, `MaxConnectionInterval=24`,
-  `ConnectionSupervisionTimeout=200`), followed by a restart of bluetoothd.
+The board keeps working while it stages: only `fw install` resets it.
 
 ## Console
 
@@ -368,7 +427,7 @@ pulled while a terminal was open, would stall every writer, the bus with
 | `nus [on\|off]` | show the BLE console state, move the console to BLE NUS or back to USB |
 | `ble [link \| forget all\|<address>]` | show the BLE settings and the bonded centrals, the active connection (`link`, see [Radio](#radio)), or forget bonds, see [Pairing](#pairing) |
 | `script [ls] \| info <name> \| rm <name> \| put <name> <size> <crc32>` | the scripts in `/scripts` with their state; what the board knows of one; remove one; `put` receives one, as `bolt script upload` sends it, see [Scripts](#scripts) |
-| `ota` | reboot into the bootloader for a BLE firmware update, see [Over BLE](#over-ble) |
+| `fw [status \| put <size> <crc32> \| install \| discard \| recovery]` | the firmware: what runs and what is staged; `put` stages an image, as `bolt fw put` sends it; `install` resets into the bootloader to install it; `discard` removes it; `recovery` resets into the bootloader's USB recovery, see [Flashing](#over-the-console-usb-or-ble) |
 | `version` | the commit and build time of the firmware, `version <commit> built <date>`, also shown in the banner |
 | `sys` | the uptime, the stack high-water mark, the heap in use and at most, the scripts running and the telegrams dropped for them, the bytes queued and lost on the USB and BLE console outputs, and whether a USB terminal is open (DTR) |
 
@@ -481,8 +540,9 @@ and saves it: anyone in range then gets the console and the knixx service
 while the board advertises. The bonds stay, so turning it on again needs no
 new pairing; a connected central that is not paired is dropped then.
 
-**OTA.** `ota` starts the Adafruit bootloader's DFU mode, which has no
-pairing; reaching it takes the console, so a paired central or USB.
+**Updates.** `fw put` over BLE goes through the console, so it takes a
+paired central; and whatever it stages must be signed, see
+[Signed images](#building).
 
 ### Radio
 
@@ -808,8 +868,8 @@ localhost.
 
 ### Setting up the board
 
-1. Flash the firmware: `cargo xtask flash`, or `thunder.uf2` from a
-   [release](#from-a-release). It has the knixx GATT service; a build with
+1. Flash the firmware: `cargo xtask flash`, or `bolt flash thunder.kfw` from
+   a [release](#from-a-release). It has the knixx GATT service; a build with
    `--no-web-ble` leaves it out, and `config set ble.knixx on` says so.
 2. `config set ble.knixx on`. The board then advertises all the time, not
    only while the console is on BLE, so that the app finds it.
@@ -1074,12 +1134,12 @@ the `nus` command, as it alone moves the console.
 
 ## Host tools
 
-- `bolt`: `bolt uf2` and `bolt ota` flash the firmware over USB and BLE,
-  `bolt genpkg` builds DFU packages, `bolt term` is the terminal on the
-  console, `bolt script` makes, builds and uploads scripts and lists and
-  removes the ones on the board, `bolt scan` looks for a board's
-  advertising, and `bolt convert`
-  turns the firmware ELF into UF2, Intel HEX or a binary. `cargo xtask`
+- `bolt`: `bolt flash` flashes a `.kfw` over USB through the bootloader's
+  recovery, `bolt fw` stages one over the console (USB or BLE) and installs
+  it, `bolt term` is the terminal on the console, `bolt script` makes,
+  builds and uploads scripts and lists and removes the ones on the board,
+  `bolt scan` looks for a board's advertising, and `bolt convert` turns the
+  firmware ELF into a signed `.kfw`, Intel HEX or a binary. `cargo xtask`
   runs it; `cargo build --release -p bolt` builds it alone, as
   `target/release/bolt`.
 - `web/` is the [web app](#web-app), in Rust with
@@ -1213,8 +1273,11 @@ folds onto the parabola y = 2x² − 1.
 | `crates/knixx-vl53l7cx` | async VL53L7CX driver, a port of ST's ULD 2.0.1 with the motion plugins; the vendored ULD and the harness that records its golden log |
 | `crates/knixx-storage` | the configuration file and other files, such as the scripts, on littlefs |
 | `crates/knixx-script` | scripts in Rhai Grain: the engine with its limits and the functions scripts call, loading and calling them, the compiler with its checks, and `template.rhai` |
-| `host/knixx-host` | host library: firmware images (ELF to UF2, Intel HEX, binary), UF2 files, the bootloader's drive, the USB serial port, flashing, BLE scanning, legacy DFU packages and updates |
-| `host/bolt` | host tool: `bolt convert`, `genpkg`, `ota`, `term`, `script`, `uf2`, `scan` |
+| `crates/knixx-image` | the `.kfw` image: its header, CRC and ed25519 signature, the bootloader's decisions, staging an image and the framed upload |
+| `firmware/knixx-boot` | the bootloader: boot, install from the QSPI flash, USB recovery |
+| `firmware/knixx-qspi` | the QSPI flash driver, for the firmware and the bootloader |
+| `host/knixx-host` | host library: firmware images (ELF to signed `.kfw`, Intel HEX, binary), the signing keys, the USB serial port, flashing over USB recovery, BLE scanning |
+| `host/bolt` | host tool: `bolt convert`, `flash`, `fw`, `term`, `script`, `scan` |
 | `host/knixx-shell` | KNX shell on the host over an FTDI-attached NCN5121 |
 | `web/` | the web app: Leptos to wasm, Web Bluetooth |
 | `xtask/` | `cargo xtask` tasks |

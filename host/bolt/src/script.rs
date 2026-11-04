@@ -155,7 +155,7 @@ fn bytecode(path: &Path, name: Option<&str>) -> Result<(String, Vec<u8>)> {
 }
 
 /// Runs f on a client of the console at t, in a runtime of its own.
-fn with_client<R>(t: &Target, f: impl AsyncFnOnce(&mut Client) -> Result<R>) -> Result<R> {
+pub fn with_client<R>(t: &Target, f: impl AsyncFnOnce(&mut Client) -> Result<R>) -> Result<R> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
@@ -170,7 +170,7 @@ fn with_client<R>(t: &Target, f: impl AsyncFnOnce(&mut Client) -> Result<R>) -> 
 
 /// Reads lines until one of the upload's: the expected one, or an error.
 /// Other lines, such as a sensor's error, are shown and skipped.
-async fn reply(c: &mut Client, want: &str, wait: Duration) -> Result<()> {
+pub async fn reply(c: &mut Client, want: &str, wait: Duration) -> Result<()> {
     loop {
         let l = c.line(wait).await?;
         if l == want {

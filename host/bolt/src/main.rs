@@ -2,6 +2,7 @@
 //!
 //!     bolt convert  turn the firmware ELF into a signed .kfw, Intel HEX or a binary
 //!     bolt flash    flash a .kfw file over USB through the bootloader's recovery
+//!     bolt fw       stage a .kfw file over the console (USB or BLE), install it
 //!     bolt term     a terminal on the console, over USB or BLE
 //!     bolt script   make, build and upload scripts; list and remove them
 //!     bolt scan     look for a board's BLE advertising
@@ -10,6 +11,7 @@
 
 mod ble;
 mod client;
+mod fw;
 mod input;
 mod script;
 mod term;
@@ -92,6 +94,13 @@ enum Cmd {
         #[arg(long, default_value_t = 20)]
         wait: u64,
     },
+    /// The firmware on the board, over its console on USB or BLE: stage a
+    /// .kfw file while it runs, install it through the bootloader, or show
+    /// what runs and what is staged.
+    Fw {
+        #[command(subcommand)]
+        cmd: FwCmd,
+    },
     /// The scripts of the board: make one from the template, build it to
     /// bytecode, upload it, list and remove the ones on the board.
     Script {
@@ -145,6 +154,29 @@ impl Board {
             wait: Duration::from_secs(self.wait),
         }
     }
+}
+
+#[derive(Subcommand)]
+enum FwCmd {
+    /// Stage a .kfw file on the board; --install installs it after.
+    Put {
+        #[arg(default_value = "build/thunder.kfw")]
+        file: PathBuf,
+        #[arg(long)]
+        install: bool,
+        #[command(flatten)]
+        board: Board,
+    },
+    /// Install the staged image: the board resets into its bootloader.
+    Install {
+        #[command(flatten)]
+        board: Board,
+    },
+    /// Show the running and the staged image.
+    Status {
+        #[command(flatten)]
+        board: Board,
+    },
 }
 
 #[derive(Subcommand)]
@@ -211,6 +243,11 @@ fn main() -> Result<()> {
         })
         .map_err(anyhow::Error::msg),
         Cmd::Scan { name, addr, wait } => scan(&name, &addr, wait),
+        Cmd::Fw { cmd } => match cmd {
+            FwCmd::Put { file, install, board } => fw::put(&file, &board.target(), install),
+            FwCmd::Install { board } => fw::install(&board.target()),
+            FwCmd::Status { board } => fw::command("fw status", &board.target()),
+        },
         Cmd::Script { cmd } => match cmd {
             ScriptCmd::New { name } => script::new(&name),
             ScriptCmd::Build { script, output } => script::build(&script, output.as_deref()),

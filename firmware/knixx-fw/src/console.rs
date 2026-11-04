@@ -27,7 +27,7 @@ use knixx_ui::switches::HOLD_TIME;
 use knixx_console::upload::{Event, Upload};
 
 use crate::link::Uptime;
-use crate::{bonds, boot, leds, link, nus, panic, script, storage, usbcdc};
+use crate::{bonds, boot, fw, leds, link, nus, panic, script, storage, usbcdc};
 
 const PROMPT: &str = ">>> ";
 
@@ -244,8 +244,8 @@ const fn commands() -> [Cmd<Ctx>; knixx_cli::NUM_SHARED + 8] {
         },
         Cmd {
             name: "fw",
-            help: "the firmware: status, or recovery to reboot into the bootloader's USB recovery",
-            run: fw,
+            help: "the firmware: status, put <size> <crc32> (stage a .kfw), install, discard, recovery",
+            run: crate::fw::command,
         },
     ]
 }
@@ -417,55 +417,6 @@ fn ble_cmd(_: &mut Ctx, args: &[&str], w: &mut dyn Write) -> Action {
     Action::None
 }
 
-fn fw(_: &mut Ctx, args: &[&str], w: &mut dyn Write) -> Action {
-    match args {
-        [] | ["status"] => {
-            fw_status(w);
-            Action::None
-        }
-        ["recovery"] => {
-            let _ = writeln!(w, "fw: rebooting into the bootloader's USB recovery");
-            Action::Reboot(boot::RECOVERY)
-        }
-        _ => {
-            let _ = writeln!(w, "usage: fw [status | recovery]");
-            Action::None
-        }
-    }
-}
-
-/// The running firmware's header, and what the bootloader did last.
-fn fw_status(w: &mut dyn Write) {
-    match boot::header() {
-        Some(h) => {
-            let _ = writeln!(
-                w,
-                "fw: running {} (counter {}, {} bytes, key {})",
-                h.version_str(),
-                h.counter,
-                h.len,
-                h.key
-            );
-        }
-        None => {
-            let _ = writeln!(w, "fw: running without an image header (flashed by the probe?)");
-        }
-    }
-    let last = LAST_RESULT.load(core::sync::atomic::Ordering::Relaxed);
-    let what = match last {
-        knixx_image::result::NONE => return,
-        knixx_image::result::INSTALLED => "installed",
-        knixx_image::result::WRITE => "failed writing internal flash",
-        knixx_image::result::READ => "could not read the staged image",
-        r if r & 0xF0 == knixx_image::result::REFUSED => "refused the staged image",
-        _ => "unknown",
-    };
-    let _ = writeln!(w, "fw: the bootloader {what} on the last boot ({last:#04x})");
-}
-
-/// What the bootloader did on this boot, from GPREGRET2.
-pub static LAST_RESULT: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
-
 /// The console task's state.
 struct Console {
     editor: Editor,
@@ -483,6 +434,13 @@ struct Console {
     /// and the buffer it fills.
     upload: Option<Upload>,
     stage: &'static mut [u8; script::MAX_SIZE],
+    /// The fw put in progress, which takes the console's input meanwhile.
+    fw: Option<fw::Upload>,
+    /// Input is dropped until then: the rest of a chunk after an upload
+    /// failed.
+    drop_until: Option<core::time::Duration>,
+    /// When to check and stage the complete fw put.
+    finish_at: Option<core::time::Duration>,
 }
 
 impl Console {
@@ -530,7 +488,18 @@ impl Console {
                 let _ = writeln!(Out, "nus: off, console back on USB");
             }
             Action::Upload => {
-                if let Some(up) = script::take_pending() {
+                if let Some((size, crc)) = fw::take_pending() {
+                    let chunk = if on_nus() { fw::CHUNK_NUS } else { fw::CHUNK_USB };
+                    match fw::Upload::begin(size, crc, chunk, now()) {
+                        Ok(up) => {
+                            let _ = writeln!(Out, "ready {}", up.chunk());
+                            self.fw = Some(up);
+                        }
+                        Err(e) => {
+                            let _ = writeln!(Out, "error: {e}");
+                        }
+                    }
+                } else if let Some(up) = script::take_pending() {
                     self.upload = Some(up);
                     let _ = writeln!(Out, "ready");
                 }
@@ -568,8 +537,85 @@ impl Console {
         Echo.write(PROMPT.as_bytes());
     }
 
+    /// Feeds data to the fw put in progress, reporting each chunk, and
+    /// stages the image once it is complete.
+    fn feed_fw(&mut self, data: &[u8]) {
+        let Some(up) = self.fw.as_mut() else {
+            return;
+        };
+        match up.feed(data, now()) {
+            fw::Fed::Ack(n) => {
+                let _ = writeln!(Out, "ok {n}");
+            }
+            fw::Fed::Resend(n) => {
+                let _ = writeln!(Out, "resend {n}");
+                return;
+            }
+            fw::Fed::Failed(e) => {
+                let _ = writeln!(Out, "error: {e}");
+                self.end_fw();
+                return;
+            }
+            _ => return,
+        }
+        if up.complete() {
+            // The ok goes out first: checking the file blocks for seconds,
+            // and the host would take the silence for a lost frame.
+            self.finish_at = Some(now() + core::time::Duration::from_millis(100));
+        }
+    }
+
+    /// Checks and stages the complete fw put, once its last ok went out.
+    fn finish_fw(&mut self) {
+        if self.finish_at.is_none_or(|t| now() < t) {
+            return;
+        }
+        self.finish_at = None;
+        let Some(up) = self.fw.take() else {
+            return;
+        };
+        let size = up.size();
+        let _ = match up.finish() {
+            fw::Fed::Done(h) => writeln!(
+                Out,
+                "done {size}\nfw: staged {} (counter {}); fw install installs it",
+                h.version_str(),
+                h.counter
+            ),
+            fw::Fed::Failed(e) => writeln!(Out, "error: {e}"),
+            _ => Ok(()),
+        };
+        // A frame the host sent again meanwhile is not a command; short, so
+        // that the next session's first key gets through.
+        self.drop_until = Some(now() + core::time::Duration::from_millis(150));
+        Echo.write(PROMPT.as_bytes());
+    }
+
+    /// Ends a failed fw put: the rest of the chunk on its way is dropped.
+    fn end_fw(&mut self) {
+        self.fw = None;
+        let _ = knixx_image::stage::Files::remove(&mut crate::storage::Fs, knixx_image::STAGED_TMP);
+        self.drop_until = Some(now() + core::time::Duration::from_millis(300));
+        Echo.write(PROMPT.as_bytes());
+    }
+
     /// Ends an upload that saw no byte for upload::TIMEOUT.
     fn poll_upload(&mut self) {
+        self.finish_fw();
+        if let Some(up) = self.fw.as_mut() {
+            up.poll(now());
+        }
+        if let Some(up) = &self.fw
+            && up.timed_out(now())
+        {
+            let _ = writeln!(
+                Out,
+                "error: upload timed out after {} of {} bytes",
+                up.received(),
+                up.size()
+            );
+            self.end_fw();
+        }
         let Some(up) = self.upload else {
             return;
         };
@@ -589,13 +635,25 @@ impl Console {
     /// bytes of an upload. What follows the line that starts an upload in the
     /// same packet is dropped: the host waits for ready.
     async fn input(&mut self, data: &[u8]) {
+        if let Some(t) = self.drop_until {
+            if now() < t {
+                return;
+            }
+            self.drop_until = None;
+        }
+        if self.fw.is_some() {
+            if self.finish_at.is_none() {
+                self.feed_fw(data);
+            }
+            return;
+        }
         if self.upload.is_some() {
             self.feed_upload(data);
             return;
         }
         for &b in data {
             self.key(b).await;
-            if self.upload.is_some() {
+            if self.upload.is_some() || self.fw.is_some() {
                 return;
             }
         }
@@ -694,14 +752,31 @@ impl Console {
             Err(_) => Action::None,
         };
         self.act(action).await;
-        if self.upload.is_none() {
+        if self.upload.is_none() && self.fw.is_none() {
             Echo.write(PROMPT.as_bytes());
         }
     }
 }
 
+/// The packets from the USB port, which usb_rx reads: a task of its own,
+/// so that a read is never dropped halfway, as it would be in a select
+/// that the console's timer wins. A full channel holds the port off (USB
+/// NAKs), so nothing is lost while the console writes the flash.
+static USB_RX: Channel<CriticalSectionRawMutex, ([u8; 64], usize), 4> = Channel::new();
+
 #[embassy_executor::task]
-pub async fn task(mut rx: Receiver<'static, Driver<'static, HardwareVbusDetect>>) -> ! {
+pub async fn usb_rx(mut rx: Receiver<'static, Driver<'static, HardwareVbusDetect>>) -> ! {
+    let mut buf = [0u8; 64];
+    loop {
+        rx.wait_connection().await;
+        if let Ok(n) = rx.read_packet(&mut buf).await {
+            USB_RX.send((buf, n)).await;
+        }
+    }
+}
+
+#[embassy_executor::task]
+pub async fn task() -> ! {
     let mut con = Console {
         editor: Editor::new(PROMPT),
         greeted: false,
@@ -710,29 +785,26 @@ pub async fn task(mut rx: Receiver<'static, Driver<'static, HardwareVbusDetect>>
         last_panic: panic::last(),
         ctx: Ctx,
         upload: None,
+        fw: None,
+        drop_until: None,
+        finish_at: None,
         stage: {
             static STAGE: static_cell::StaticCell<[u8; script::MAX_SIZE]> = static_cell::StaticCell::new();
             STAGE.init([0; script::MAX_SIZE])
         },
     };
-    let mut buf = [0u8; 64];
     loop {
         con.poll_nus().await;
         con.poll_switches().await;
         con.poll_upload();
-        let usb = async {
-            rx.wait_connection().await;
-            rx.read_packet(&mut buf).await
-        };
-        match select3(usb, nus::RX_READY.wait(), Timer::after_millis(100)).await {
-            Either3::First(Ok(n)) => {
+        match select3(USB_RX.receive(), nus::RX_READY.wait(), Timer::after_millis(100)).await {
+            Either3::First((buf, n)) => {
                 con.new_usb_session();
                 // Typing on USB while the console runs on NUS is dropped.
                 if !on_nus() {
                     con.input(&buf[..n]).await;
                 }
             }
-            Either3::First(Err(_)) => {}
             Either3::Second(()) => {
                 let mut chunk = [0u8; 64];
                 while on_nus() {

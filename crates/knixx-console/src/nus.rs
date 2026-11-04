@@ -5,9 +5,10 @@
 
 use core::time::Duration;
 
-/// The capacity of `Ring`. It holds several writes of a central, each at
-/// most 20 bytes with the default ATT MTU.
-pub const RING_LEN: usize = 256;
+/// The capacity of `Ring`, a power of two. It holds the writes of a
+/// central while the console is busy: a chunk of an upload (fw put sends
+/// 2 KiB at a time over NUS) and room to spare.
+pub const RING_LEN: usize = 4096;
 
 /// A byte queue for the writes of a central.
 pub struct Ring {

@@ -19,6 +19,7 @@ mod bonds;
 mod boot;
 mod bus;
 mod console;
+mod fw;
 #[cfg(feature = "scripts")]
 mod heap;
 mod i2c;
@@ -58,7 +59,6 @@ async fn main(spawner: Spawner) {
     stack::paint();
     panic::latch();
     boot::sanitize();
-    console::LAST_RESULT.store(boot::last_result(), core::sync::atomic::Ordering::Relaxed);
 
     // Interrupt priorities: MPSL keeps P0 (radio, its timers) and P1 to
     // itself and runs its clock and low-priority work at P4. The rest of the
@@ -92,6 +92,7 @@ async fn main(spawner: Spawner) {
     let (dev, ok) = console::BOOT_LOG.lock(|l| storage::load(p.QSPI, Irqs, pins, &mut *l.borrow_mut()));
     console::DEVICE.lock(|d| d.set(Some(dev)));
     console::BOOT_LOG.lock(|l| bonds::load(&mut *l.borrow_mut()));
+    fw::tidy();
     if !ok {
         leds::signal(Mode::Error);
     }
@@ -106,7 +107,8 @@ async fn main(spawner: Spawner) {
 
     let (rx, tx) = usbcdc::start(&spawner, p.USBD, Irqs);
     spawner.spawn(usbcdc::tx_task(tx).unwrap());
-    spawner.spawn(console::task(rx).unwrap());
+    spawner.spawn(console::usb_rx(rx).unwrap());
+    spawner.spawn(console::task().unwrap());
 
     let uart = bus::uart(
         bus::Peripherals {

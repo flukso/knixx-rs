@@ -17,6 +17,11 @@ codegen-units = 1
 debug = 2
 panic = "abort"
 
+# The ed25519 verifier checks an image once per update: small matters, not
+# fast.
+[profile.release.package.ed25519-compact]
+opt-level = "z"
+
 [profile.dev]
 opt-level = "s"
 panic = "abort"

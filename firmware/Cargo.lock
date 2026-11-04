@@ -1137,6 +1137,7 @@ dependencies = [
  "bt-hci",
  "cortex-m",
  "cortex-m-rt",
+ "ed25519-compact",
  "embassy-embedded-hal",
  "embassy-executor",
  "embassy-futures",

@@ -157,3 +157,38 @@ pub fn list_dir(path: &str, mut f: impl FnMut(&str, u32)) -> Result<(), FileErro
 pub fn file_size(path: &str) -> Result<Option<u32>, FileError> {
     with_flash(|fl| knixx_storage::stat(fl, path, |e| e.filter(|e| !e.dir).map(|e| e.size)))
 }
+
+/// The littlefs as the files a staged firmware goes to
+/// (knixx_image::stage).
+pub struct Fs;
+
+impl knixx_image::stage::Files for Fs {
+    type Error = FileError;
+
+    fn create(&mut self, path: &str) -> Result<(), FileError> {
+        with_flash(|fl| {
+            knixx_storage::mkdir(fl, knixx_image::STAGED_DIR)?;
+            knixx_storage::create(fl, path)
+        })
+    }
+
+    fn append(&mut self, path: &str, data: &[u8]) -> Result<u32, FileError> {
+        with_flash(|fl| knixx_storage::append(fl, path, data))
+    }
+
+    fn read_at(&mut self, path: &str, off: u32, buf: &mut [u8]) -> Result<usize, FileError> {
+        with_flash(|fl| knixx_storage::read_at(fl, path, off, buf))
+    }
+
+    fn rename(&mut self, from: &str, to: &str) -> Result<(), FileError> {
+        with_flash(|fl| knixx_storage::rename(fl, from, to))
+    }
+
+    fn remove(&mut self, path: &str) -> Result<(), FileError> {
+        with_flash(|fl| knixx_storage::remove(fl, path).map(|_| ()))
+    }
+
+    fn free(&mut self) -> Result<u32, FileError> {
+        with_flash(knixx_storage::free)
+    }
+}

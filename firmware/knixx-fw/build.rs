@@ -1,6 +1,10 @@
-//! Puts memory.x where the linker finds it, and passes on the version that
-//! cargo xtask build stamps the firmware with.
+//! Puts memory.x where the linker finds it, passes on the version that
+//! cargo xtask build stamps the firmware with, and writes the public keys
+//! that staged images must be signed with (see firmware/keys.rs).
 use std::{env, fs, path::PathBuf};
+
+#[path = "../keys.rs"]
+mod keys;
 
 fn main() {
     let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
@@ -12,4 +16,5 @@ fn main() {
         println!("cargo:rustc-env={var}={v}");
         println!("cargo:rerun-if-env-changed={var}");
     }
+    keys::write(&out);
 }

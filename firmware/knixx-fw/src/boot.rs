@@ -7,6 +7,8 @@ use knixx_image::{self as image, HEADER_SIZE, Header};
 
 /// Waits for an image over USB: the 1200-baud touch, `fw recovery`.
 pub const RECOVERY: u8 = image::GPREGRET_RECOVERY;
+/// Installs the staged image: `fw install`.
+pub const INSTALL: u8 = image::GPREGRET_INSTALL;
 
 /// Resets the chip into the bootloader in mode magic.
 pub fn reset_into(magic: u8) -> ! {

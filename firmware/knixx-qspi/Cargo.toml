@@ -1,0 +1,9 @@
+[package]
+name = "knixx-qspi"
+version = "0.1.0"
+description = "The knixx thunder's 2 MiB QSPI flash as a knixx-storage block device, for the firmware and the bootloader"
+edition = "2024"
+
+[dependencies]
+embassy-nrf = { version = "0.11.0", features = ["nrf52840", "unstable-pac"] }
+knixx-storage = { path = "../../crates/knixx-storage" }

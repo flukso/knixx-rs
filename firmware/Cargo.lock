@@ -495,6 +495,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "ed25519-compact"
+version = "2.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1454db4f2edb7f0e8fe0c5b375b0c978fc63244cc9f010d160e417eb10139aa8"
+
+[[package]]
 name = "either"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1074,6 +1080,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "knixx-boot"
+version = "0.1.0"
+dependencies = [
+ "cortex-m",
+ "cortex-m-rt",
+ "ed25519-compact",
+ "embassy-executor",
+ "embassy-futures",
+ "embassy-nrf",
+ "embassy-time",
+ "embassy-usb",
+ "embedded-storage",
+ "knixx-image",
+ "knixx-qspi",
+ "knixx-storage",
+ "static_cell",
+]
+
+[[package]]
 name = "knixx-bus"
 version = "0.1.0"
 dependencies = [
@@ -1126,7 +1151,9 @@ dependencies = [
  "knixx-cli",
  "knixx-console",
  "knixx-device",
+ "knixx-image",
  "knixx-knx",
+ "knixx-qspi",
  "knixx-script",
  "knixx-sensors",
  "knixx-storage",
@@ -1140,12 +1167,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "knixx-image"
+version = "0.1.0"
+dependencies = [
+ "ed25519-compact",
+]
+
+[[package]]
 name = "knixx-knx"
 version = "0.1.0"
 
 [[package]]
 name = "knixx-ncn"
 version = "0.1.0"
+
+[[package]]
+name = "knixx-qspi"
+version = "0.1.0"
+dependencies = [
+ "embassy-nrf",
+ "knixx-storage",
+]
 
 [[package]]
 name = "knixx-script"

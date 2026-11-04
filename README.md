@@ -79,7 +79,7 @@ through an onsemi NCN5121 transceiver on UARTE0 at 38400 baud.
 - **Pairing.** BLE takes a paired central: one that bonded with the board
   while the console was on BLE, which takes the USB console or the wall
   switches. Up to four bonds are kept, see [Pairing](#pairing).
-- **Web app.** With the `web-ble` firmware, a browser on a phone or a
+- **Web app.** With `ble.knixx` on, a browser on a phone or a
   computer switches the lights of the installation and sends any group
   value, over Web Bluetooth and the board's knixx GATT service, see
   [Web app](#web-app).
@@ -129,8 +129,8 @@ The firmware and the host tools build on macOS and Linux.
   `web/rust-toolchain.toml` adds the `wasm32-unknown-unknown` target.
 
 ```sh
-cargo xtask build    # build the firmware: build/knixx.{elf,uf2,hex}, build/knixx-dfu.zip; --web-ble, --no-scripts
-cargo xtask flash    # build and flash over USB; --port picks the serial port; --web-ble, --no-scripts
+cargo xtask build    # build the firmware: build/thunder.{elf,uf2,hex}, build/thunder-dfu.zip; --no-scripts, --no-web-ble, --no-coded-phy
+cargo xtask flash    # build and flash over USB; --port picks the serial port; --no-scripts, --no-web-ble, --no-coded-phy
 cargo xtask ota      # build and flash over BLE (run ota on the console first); --addr picks a board
 cargo xtask term     # a terminal on the console, on USB, else BLE; --usb, --ble, --port, --addr
 cargo xtask cycle N  # build, then flash N times, checking USB and BLE after each
@@ -150,16 +150,33 @@ cargo xtask build
 
 builds the firmware, stamped with the git commit (with `-dirty` when
 tracked files differ from it) and the build time in UTC, and writes
-`build/knixx.elf`, `build/knixx.uf2`, `build/knixx.hex` and the DFU package
-`build/knixx-dfu.zip`. It reports the flash and RAM the firmware takes, and
-fails when the image does not fit `0x26000`–`0xED000`, or on the heap rule
-below. `cargo xtask build --no-scripts` builds the firmware without scripts:
-about 456 KB of flash, against 714 KB with them, of which Rhai is some
-165 KB and BLE pairing (LE Secure Connections, with its P-256 code) some
-64 KB. `cargo xtask build --web-ble` adds the knixx GATT service for the
-[web app](#web-app), about 6 KB more, and `--coded-phy` long-range BLE on
-the coded PHY, about 22 KB more (see [Radio](#radio)); the flags combine.
-With all of them the firmware takes 742 KB, 91% of the application's flash.
+`build/thunder.elf`, `build/thunder.uf2`, `build/thunder.hex` and the DFU
+package `build/thunder-dfu.zip`. It reports the flash and RAM the firmware
+takes, and fails when the image does not fit `0x26000`–`0xED000`, or on the
+heap rule below.
+
+**One build, every feature in.** There is one firmware, thunder, and it has
+every feature: scripts, the knixx GATT service for the [web app](#web-app)
+and long-range BLE on the coded PHY. It takes 744 KB, 91% of the
+application's flash. The config keys decide what runs: `ble.knixx` and
+`ble.coded` are off by default, so a board out of the box behaves as one
+without them until they are switched on. This is the build that CI checks
+and that each release carries.
+
+Flags leave a feature out, for a smaller build or to rule one out; they
+combine:
+
+| flag | leaves out | flash saved |
+|---|---|---|
+| `--no-scripts` | the scripts in Rhai Grain and their heap; no allocator is linked | about 258 KB, Rhai most of it |
+| `--no-web-ble` | the knixx GATT service; `config set ble.knixx on` says it is not built in | about 6 KB |
+| `--no-coded-phy` | the coded PHY and extended advertising (see [Radio](#radio)); `config set ble.coded on` says it is not built in | about 22 KB |
+
+With all three, the firmware takes 458 KB, of which BLE pairing (LE Secure
+Connections, with its P-256 code) is some 64 KB. `cargo xtask flash` and
+`ota` take the same flags. CI builds only the full firmware, so a build
+with flags is checked when someone makes it. `--web-ble` and `--coded-phy`,
+which added the features before 0.6, are refused.
 
 **A heap for scripts only.** The crates in `crates/` are `no_std` without
 `alloc`, and buffers are fixed size, in statics or in the embassy tasks.
@@ -172,10 +189,10 @@ anywhere else shows at once. `sys` shows the heap in use and the most used
 since boot. Without the `scripts` feature the firmware links no allocator at
 all, and `cargo xtask build --no-scripts` fails if it does.
 
-**RAM.** The statics take about 55 KiB without scripts and 110 KiB with
-them, the heap included (116 KiB with `--web-ble --coded-phy`, whose BLE
-controller needs 7.4 KiB rather than 2.8); the stack below them has the
-rest, about 200 KiB without scripts and 146 KiB with them. flip-link puts the stack at the
+**RAM.** The statics take about 116 KiB, the heap of scripts included;
+the stack below them has the rest, about 140 KiB. The BLE controller needs
+7.4 KiB for the coded PHY, rather than 2.8 with `--no-coded-phy`. With all
+three flags the statics take 55 KiB and the stack 200 KiB. flip-link puts the stack at the
 bottom of RAM, so that an overflow faults instead of overwriting statics. The embassy tasks live in statics; the stack
 serves `main`, the executor and the interrupt handlers. `sys` shows the most
 of it used since boot: the firmware paints the stack at boot and finds the
@@ -211,18 +228,17 @@ the firmware, so that a board can be flashed without building it:
 
 | file | what |
 |---|---|
-| `knixx.uf2` | the firmware, for the UF2 bootloader's drive (USB) |
-| `knixx-dfu.zip` | the firmware as a DFU package (BLE) |
-| `knixx.hex`, `knixx.elf` | the firmware for a debug probe, and with its symbols |
-| `knixx-web-ble.uf2`, `knixx-web-ble-dfu.zip`, … | the firmware with the knixx GATT service for the [web app](#web-app) |
-| `knixx-web-ble-coded.uf2`, `knixx-web-ble-coded-dfu.zip`, … | the same with long-range BLE on the coded PHY, see [Radio](#radio) |
+| `thunder.uf2` | the firmware, every feature in, for the UF2 bootloader's drive (USB) |
+| `thunder-dfu.zip` | the firmware as a DFU package (BLE) |
+| `thunder.hex`, `thunder.elf` | the firmware for a debug probe, and with its symbols |
 | `bolt-<tag>-<target>.tar.gz` | `bolt` for Linux (x86_64, aarch64) and Apple Silicon macOS |
 
 Double-tap reset to get the bootloader's `FTHR840BOOT` drive and copy a
-`.uf2` onto it, or use `bolt uf2 knixx.uf2`. On macOS, a `bolt` downloaded
+`thunder.uf2` onto it, or use `bolt uf2 thunder.uf2`. On macOS, a `bolt` downloaded
 with a browser is quarantined: `xattr -d com.apple.quarantine bolt` lets it
 run. A tag `v*` pushed to GitHub makes the release
-(`.github/workflows/release.yml`).
+(`.github/workflows/release.yml`). Releases up to 0.5.1 carry three builds
+instead, as `knixx.*`, `knixx-web-ble.*` and `knixx-web-ble-coded.*`.
 
 ### Over USB
 
@@ -265,7 +281,7 @@ USB and the BLE controller can hang.
 
 ### Over BLE
 
-1. Run `cargo xtask ota` on the host. It builds `build/knixx-dfu.zip` and
+1. Run `cargo xtask ota` on the host. It builds `build/thunder-dfu.zip` and
    runs `bolt ota`, which waits up to 60 s for a bootloader in BLE DFU
    mode.
 2. Type `ota` on the USB or the BLE console. The firmware writes 0xA8 to
@@ -277,9 +293,9 @@ USB and the BLE controller can hang.
 
 The packets carry as much as the negotiated ATT MTU allows, 244 bytes with
 the bootloader's MTU of 247, which sent a 364 KB image in about a minute
-(the firmware with scripts is about 698 KB);
+(the firmware is about 744 KB);
 `bolt ota --chunk` sets another size. Phone apps that speak legacy DFU, such
-as nRF Connect or Bluefruit Connect, can also send `build/knixx-dfu.zip`.
+as nRF Connect or Bluefruit Connect, can also send `build/thunder-dfu.zip`.
 
 `bolt genpkg <app.hex> <package.zip>` builds a DFU package as
 adafruit-nrfutil dfu genpkg does, with the init packet of the Feather's
@@ -454,8 +470,7 @@ Bluetooth settings too (`bluetoothctl remove <address>` on Linux), then
 pair again in a pairing window.
 
 **Firmware updates.** Phones and computers cache the services of a bonded
-board. When an update changes them, for example to or from the `web-ble`
-firmware, the board tells each bonded central on its next connection (the
+board. When an update changes them, for example from one with `--no-web-ble`, the board tells each bonded central on its next connection (the
 GATT Service Changed indication), and the central reads them again. A
 central that bonded with firmware older than this has no Service Changed
 in its cache and needs pairing once more. The last line of `ble` shows
@@ -495,9 +510,8 @@ faster.
 
 **Coded PHY: long range.** The LE Coded PHY sends each bit as 8 symbols
 (S8, 125 kbps): about 4 times the range of 1M at the same TX power, at an
-eighth of its speed. It takes the `coded-phy` firmware (`cargo xtask build
---coded-phy`, which combines with `--web-ble`) and `config set ble.coded
-on`. The board then advertises twice:
+eighth of its speed. `config set ble.coded on` switches it on (a build with
+`--no-coded-phy` leaves it out). The board then advertises twice:
 
 - on 1M as ever, so that every phone and computer finds it, and
 - on coded, for a central that scans the coded PHY.
@@ -588,9 +602,9 @@ value in the *missing* column below, which for the group addresses is
 | `occupancy.min_distance` | near end of the motion window, mm | 400 | 400 | 400–4000 |
 | `occupancy.max_distance` | far end of the motion window, mm | 1500 | 1500 | 400–4000 |
 | `ble.pair` | whether BLE takes a paired central, see [Pairing](#pairing) | on | on | `on`, `off` |
-| `ble.knixx` | whether the board advertises the knixx service for the [web app](#web-app) all the time | off | off | `on`, `off`; `on` only with the `web-ble` firmware |
+| `ble.knixx` | whether the board advertises the knixx service for the [web app](#web-app) all the time | off | off | `on`, `off`; `on` not with `--no-web-ble` |
 | `ble.tx_power` | the radio's transmit power, dBm, see [Radio](#radio) | 0 | 0 | -40, -20, -16, -12, -8, -4, 0, 2 to 8 |
-| `ble.coded` | whether the board also advertises on the coded PHY, for long range, see [Radio](#radio) | off | off | `on`, `off`; `on` only with the `coded-phy` firmware |
+| `ble.coded` | whether the board also advertises on the coded PHY, for long range, see [Radio](#radio) | off | off | `on`, `off`; `on` not with `--no-coded-phy` |
 
 Group addresses use the 3-level form 0–31/0–7/0–255. The 2-level form
 (main/sub) and raw numbers are also accepted. 0/0/0, the broadcast address,
@@ -794,10 +808,9 @@ localhost.
 
 ### Setting up the board
 
-1. Flash the firmware with the knixx GATT service: `cargo xtask flash
-   --web-ble`, or `knixx-web-ble.uf2` from a [release](#from-a-release).
-   The default firmware leaves the service out, and `config set ble.knixx
-   on` says so.
+1. Flash the firmware: `cargo xtask flash`, or `thunder.uf2` from a
+   [release](#from-a-release). It has the knixx GATT service; a build with
+   `--no-web-ble` leaves it out, and `config set ble.knixx on` says so.
 2. `config set ble.knixx on`. The board then advertises all the time, not
    only while the console is on BLE, so that the app finds it.
 3. Pair the phone or computer once, see [Pairing](#pairing): `nus on`, open
@@ -925,8 +938,8 @@ leaves when it jumps to the application (nrf-sdc issue #103). The
 controller is set up at boot and stays idle, with the radio silent, until
 `nus on`, or for good with `ble.knixx` on.
 
-- **One central at a time**, with NUS and, in the `web-ble` firmware, the
-  knixx service. With the knixx service, the advertising carries its UUID,
+- **One central at a time**, with NUS and the knixx service (the
+  `web-ble` feature). With the knixx service, the advertising carries its UUID,
   for the app's filter, and the scan response the NUS UUID: two 128-bit
   UUIDs and the name do not fit one packet. `nus off` drops the central
   unless the knixx service keeps the board advertising and the central is
@@ -937,7 +950,7 @@ controller is set up at boot and stays idle, with the radio silent, until
   a change goes to the advertising and the connection with Nordic's vendor
   command, on the fly. A task reads the link's RSSI and TX power every 2 s
   for `ble link` (and for the knixx service's `rssi`).
-- **Coded PHY** (`coded-phy`) needs the controller's multirole library,
+- **Coded PHY** (the `coded-phy` feature) needs the controller's multirole library,
   which has extended advertising and the coded PHY. The controller holds to
   legacy or extended advertising commands from the first it gets, so this
   build advertises its 1M set (a legacy PDU) through the extended commands
@@ -1221,14 +1234,13 @@ by step, the state, the telegram, the sends and their limits, the errors
 returned rather than panics, the compiler's checks and the fault lines.
 `cargo xtask golden --check` checks the golden log against ST's C driver,
 and `cargo xtask genfw --check` the firmware files against its header.
-`cargo clippy --all-targets`, in `firmware/` `cargo clippy --release`
-(with `--features web-ble` too), and in `web/` `cargo clippy` lint the
+`cargo clippy --all-targets`, in `firmware/` `cargo clippy --release` (the
+full firmware, every feature in), and in `web/` `cargo clippy` lint the
 three workspaces.
 
 CI runs the host tests, the golden log and firmware checks, the lints,
 `cargo fmt --check`, the `no_std` build of each crate, `cargo xtask build`
-with and without scripts and the knixx service, with its flash, RAM and
-heap checks, `cargo bloat` and the license check of the host workspace and
+of the full firmware, with its flash, RAM and heap checks, `cargo bloat` and the license check of the host workspace and
 of the web app.
 
 ## License

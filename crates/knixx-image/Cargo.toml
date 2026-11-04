@@ -1,0 +1,13 @@
+[package]
+name = "knixx-image"
+version = "0.1.0"
+description = "The firmware image of knixx thunder: the .kfw header, its CRC and ed25519 signature, and the bootloader's decisions"
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Signing, for the host tools; the board only verifies.
+sign = []
+
+[dependencies]
+ed25519-compact = { version = "2.6.0", default-features = false }

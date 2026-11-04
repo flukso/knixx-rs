@@ -6,7 +6,9 @@ on:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    # Ubuntu 24.04 and its clang 18: with 26.04's clang 21, the bindgen of
+    # nrf-mpsl-sys finds no stdint.h for the nRF52840.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: Packages

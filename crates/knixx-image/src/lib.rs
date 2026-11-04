@@ -26,9 +26,9 @@ pub use ed25519_compact::{PublicKey, Signature};
 
 /// The bootloader, from the start of flash.
 pub const BOOT_START: u32 = 0x0000_0000;
-pub const BOOT_SIZE: u32 = 0x0000_F000;
+pub const BOOT_SIZE: u32 = 0x0001_0000;
 /// The header of the installed application.
-pub const HEADER_ADDR: u32 = 0x0000_F000;
+pub const HEADER_ADDR: u32 = 0x0001_0000;
 pub const HEADER_SIZE: usize = 256;
 /// The application, from its vector table to the end of flash.
 pub const APP_START: u32 = HEADER_ADDR + HEADER_SIZE as u32;
@@ -49,6 +49,8 @@ pub const STAGED_TMP: &str = "/fw/update.tmp";
 /// GPREGRET: what the next boot does. The bootloader clears it.
 pub const GPREGRET_RECOVERY: u8 = 0x57;
 pub const GPREGRET_INSTALL: u8 = 0xB1;
+/// The bootloader's own: no application and nothing to install.
+pub const GPREGRET_NO_APP: u8 = 0xB2;
 
 /// The word at the start of RAM that the bootloader sets during the double
 /// tap's wait: a second reset within it enters recovery.
@@ -472,6 +474,8 @@ impl fmt::Display for Why {
 pub fn first_step(gpregret: u8, double_tap: bool, app_valid: bool) -> Step {
     if gpregret == GPREGRET_RECOVERY {
         Step::Recovery(Why::Asked)
+    } else if gpregret == GPREGRET_NO_APP && !app_valid {
+        Step::Recovery(Why::NoApp)
     } else if double_tap {
         Step::Recovery(Why::DoubleTap)
     } else if gpregret == GPREGRET_INSTALL || !app_valid {

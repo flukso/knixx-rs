@@ -167,6 +167,8 @@ fn first_steps() {
     assert_eq!(first_step(GPREGRET_RECOVERY, false, true), Recovery(Why::Asked));
     assert_eq!(first_step(GPREGRET_INSTALL, true, true), Recovery(Why::DoubleTap));
     assert_eq!(first_step(0, true, false), Recovery(Why::DoubleTap));
+    assert_eq!(first_step(GPREGRET_NO_APP, false, false), Recovery(Why::NoApp));
+    assert_eq!(first_step(GPREGRET_NO_APP, false, true), Boot);
     // An unknown value is no request.
     assert_eq!(first_step(0xA8, false, true), Boot);
 }
@@ -190,7 +192,7 @@ fn install_steps() {
 fn layout() {
     // The vector table at APP_START needs 256-byte alignment (64 vectors).
     assert_eq!(APP_START % 256, 0);
-    assert_eq!(APP_START, 0x0F100);
+    assert_eq!(APP_START, 0x10100);
     assert_eq!(HEADER_ADDR % FLASH_PAGE, 0);
     assert_eq!(BOOT_START + BOOT_SIZE, HEADER_ADDR);
 }

@@ -80,9 +80,35 @@ pub fn push(path: &Path, name: &str, addr: &str, wait: Duration) -> Result<()> {
 
 async fn push_async(data: &[u8], name: &str, addr: &str, wait: Duration) -> Result<()> {
     let (p, _gone) = ble::connect(name, addr, wait, "fw window 10").await?;
+    let start = Instant::now();
+    let counter = push_on(&p, data, |acked| {
+        let rate = acked as f64 / start.elapsed().as_secs_f64() / 1024.0;
+        eprint!(
+            "\rsent {} of {} KiB, {rate:.1} KiB/s ",
+            acked / 1024,
+            data.len() / 1024
+        );
+    })
+    .await?;
+    eprintln!(
+        "\rstaged counter {counter} in {:.1} s ({:.1} KiB/s)           ",
+        start.elapsed().as_secs_f32(),
+        data.len() as f64 / 1024.0 / start.elapsed().as_secs_f64()
+    );
+    let _ = p.disconnect().await;
+    Ok(())
+}
+
+/// Pushes data, a .kfw, over the fw service of the connected board p, and
+/// returns the counter the board staged; progress gets the bytes acked.
+pub async fn push_on(
+    p: &btleplug::platform::Peripheral,
+    data: &[u8],
+    mut progress: impl FnMut(usize),
+) -> Result<u32> {
     let (Some(ctrl), Some(dchar)) = (
-        ble::characteristic(&p, FW_SERVICE, FW_CTRL),
-        ble::characteristic(&p, FW_SERVICE, FW_DATA),
+        ble::characteristic(p, FW_SERVICE, FW_CTRL),
+        ble::characteristic(p, FW_SERVICE, FW_DATA),
     ) else {
         bail!("the board has no fw service: its firmware is too old");
     };
@@ -127,7 +153,6 @@ async fn push_async(data: &[u8], name: &str, addr: &str, wait: Duration) -> Resu
 
     let mtu = usize::from(p.mtu());
     let piece = mtu.saturating_sub(3 + 4).clamp(16, 240);
-    let start = Instant::now();
     let (mut sent, mut acked) = (from, from);
     let mut stalls = 0;
     let mut buf = Vec::with_capacity(4 + piece);
@@ -164,7 +189,7 @@ async fn push_async(data: &[u8], name: &str, addr: &str, wait: Duration) -> Resu
                 sent = off;
             }
             Some(Note::Error(c, r)) => bail!("the board: {r} ({c:#04x})"),
-            Some(Note::Done(_)) => break,
+            Some(Note::Done(counter)) => return Ok(counter),
             Some(Note::Ack(_)) => {}
             None => {
                 stalls += 1;
@@ -174,34 +199,20 @@ async fn push_async(data: &[u8], name: &str, addr: &str, wait: Duration) -> Resu
                 sent = acked;
             }
         }
-        let rate = acked as f64 / start.elapsed().as_secs_f64() / 1024.0;
-        eprint!(
-            "\rsent {} of {} KiB, {rate:.1} KiB/s ",
-            acked / 1024,
-            data.len() / 1024
-        );
+        progress(acked);
     }
     // The board reads the file back before it says done.
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
         match next_note(&mut notes, left).await? {
-            Some(Note::Done(counter)) => {
-                eprintln!(
-                    "\rstaged counter {counter} in {:.1} s ({:.1} KiB/s)           ",
-                    start.elapsed().as_secs_f32(),
-                    data.len() as f64 / 1024.0 / start.elapsed().as_secs_f64()
-                );
-                break;
-            }
+            Some(Note::Done(counter)) => return Ok(counter),
             Some(Note::Error(c, r)) => bail!("the board: {r} ({c:#04x})"),
             Some(_) => {}
             None if left.is_zero() => bail!("no done from the board"),
             None => {}
         }
     }
-    let _ = p.disconnect().await;
-    Ok(())
 }
 
 #[cfg(test)]

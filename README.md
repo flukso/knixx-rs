@@ -462,8 +462,39 @@ bolt fleet close <board>               # shuts the window
   (otherwise `Current` or a refusal), at most once every 2 s. **Install**
   installs only the staged image of the counter given.
 
-Then push the image to each board in its window with `bolt fw push`. The
-bus side, between boards, waits for a test on a KNX line.
+### Updating an installation
+
+```
+bolt fleet update [build/thunder.kfw] [--via knixx] [--parallel 4] [--stagger 2] [--minutes 15]
+```
+
+updates every board that a scan finds, in one go:
+
+1. **Scan:** it scans over the proxy, and lists the boards with their
+   individual address, counter, state and BLE address. Two boards on one
+   individual address are named, since neither can be reached apart.
+2. **Open:** it opens the update window of each board that runs an older
+   image. Boards that are current, or refuse, are left as they are.
+3. **Find:** it finds those boards over BLE by the address they advertise,
+   as manufacturer data (company 0xFFFF) in the scan response. macOS shows
+   no BLE addresses, so this is how a scan's answer meets its device.
+4. **Push:** it pushes the image to each, `--parallel` at a time, up to 3
+   tries each (a try goes on from where the last one got to). The proxy
+   gets its image last, over the link bolt already holds.
+5. **Install:** it installs one board at a time, `--stagger` seconds apart,
+   so that the lights and switches don't all reboot at once. The proxy goes
+   last.
+6. **Check:** after 70 s it scans again, lists every board's outcome, and
+   fails if any board is behind. Running it again updates only those.
+
+It takes the developer's or the release key's images, as every update
+does.
+
+Tested so far by loopback, with one board as both proxy and fleet: a
+scan, the push over the proxy's link and the install, and a second run
+that finds the board current. Between boards on a KNX line, the bus side
+(the broadcast scan, the 1-1 telegrams and their acks, U_SetAddress) still
+waits for a test.
 
 ## Console
 

@@ -240,3 +240,279 @@ pub fn install_request(path: &std::path::Path) -> Result<Request> {
     let (_, hdr) = knixx_host::image::Image::from_kfw(&data).with_context(|| path.display().to_string())?;
     Ok(Request::Install { counter: hdr.counter })
 }
+
+/// A board of the installation, as a scan found it.
+#[derive(Debug, Clone)]
+struct Seen {
+    from: u16,
+    counter: u32,
+    ble: [u8; 6],
+}
+
+fn name(a: u16) -> String {
+    IndividualAddress(a).to_string()
+}
+
+/// How an update went for a board.
+#[derive(Debug, Clone)]
+enum Outcome {
+    Current,
+    Refused(u8),
+    Unreachable(String),
+    Staged,
+    Installing,
+}
+
+/// Updates every board of the installation to the .kfw at path: a scan,
+/// open on each board that runs an older image, a push to each in its
+/// window, up to parallel at a time (the proxy last, over its own link),
+/// install one by one stagger apart (the proxy last), and a scan once
+/// they are back.
+pub fn update(
+    path: &std::path::Path,
+    name_: &str,
+    addr: &str,
+    wait: Duration,
+    parallel: usize,
+    stagger: Duration,
+    minutes: u8,
+) -> Result<()> {
+    let data = std::fs::read(path).with_context(|| path.display().to_string())?;
+    let (_, hdr) = knixx_host::image::Image::from_kfw(&data).with_context(|| path.display().to_string())?;
+    eprintln!(
+        "updating to {} (counter {}, {} KiB)",
+        hdr.version_str(),
+        hdr.counter,
+        data.len() / 1024
+    );
+    runtime()?.block_on(async {
+        // The boards that advertise now, the proxy among them, by the
+        // address in their manufacturer data: it comes in the scan
+        // response, after the first sight of a board, so a short scan
+        // first rather than the proxy's properties.
+        let adapter = knixx_host::blescan::adapter().await.map_err(anyhow::Error::msg)?;
+        let advertising = knixx_host::blescan::find_boards(&adapter, &[], Duration::from_secs(3))
+            .await
+            .map_err(anyhow::Error::msg)?;
+        let mut proxy = Proxy::connect(name_, addr, wait).await?;
+        let proxy_id = proxy.p.id();
+        let proxy_ble = advertising
+            .iter()
+            .find(|(_, p)| p.id() == proxy_id)
+            .map(|(a, _)| *a);
+        if proxy_ble.is_none() {
+            eprintln!("the proxy's address was not seen in its advertising: it is updated like the others");
+        }
+
+        // 1. Who is there.
+        proxy.send(0, &Request::Scan).await?;
+        let mut seen: Vec<Seen> = proxy
+            .answers(SCAN_WAIT, None)
+            .await?
+            .into_iter()
+            .filter_map(|a| match a.response {
+                Response::Info { counter, ble, .. } => Some(Seen {
+                    from: a.from,
+                    counter,
+                    ble,
+                }),
+                _ => None,
+            })
+            .collect();
+        seen.sort_by_key(|s| s.from);
+        // Two boards on one individual address answer with different BLE
+        // addresses: neither can be told apart on the bus.
+        for (i, s) in seen.iter().enumerate() {
+            if seen[..i].iter().any(|t| t.from == s.from && t.ble != s.ble) {
+                eprintln!(
+                    "{}: two boards on this individual address; give each its own (device.individual)",
+                    name(s.from)
+                );
+            }
+        }
+        seen.dedup_by_key(|s| s.from);
+        eprintln!("{} board(s) answered", seen.len());
+        let mut outcome: Vec<(u16, Outcome)> = Vec::new();
+
+        // 2. Open each board that runs an older image.
+        let mut ready: Vec<Seen> = Vec::new();
+        for s in &seen {
+            if s.counter >= hdr.counter {
+                outcome.push((s.from, Outcome::Current));
+                continue;
+            }
+            proxy
+                .send(
+                    s.from,
+                    &Request::Open {
+                        counter: hdr.counter,
+                        crc: hdr.body_crc,
+                        minutes,
+                    },
+                )
+                .await?;
+            let a = proxy.answers(Duration::from_secs(3), Some(s.from)).await?;
+            match a.iter().find(|a| a.from == s.from).map(|a| a.response) {
+                Some(Response::Ready { .. }) => ready.push(s.clone()),
+                Some(Response::Current) => outcome.push((s.from, Outcome::Current)),
+                Some(Response::Refused { reason }) => outcome.push((s.from, Outcome::Refused(reason))),
+                _ => outcome.push((s.from, Outcome::Unreachable("no answer to open".into()))),
+            }
+        }
+        let is_proxy = |s: &Seen| Some(s.ble) == proxy_ble;
+        let (proxies, others): (Vec<Seen>, Vec<Seen>) = ready.into_iter().partition(|s| is_proxy(s));
+        eprintln!(
+            "{} board(s) to push to{}",
+            others.len() + proxies.len(),
+            if proxies.is_empty() {
+                ""
+            } else {
+                ", the proxy last"
+            }
+        );
+
+        // 3. Find the others over BLE, by the address they advertise.
+        let want: Vec<[u8; 6]> = others.iter().map(|s| s.ble).collect();
+        let found = if want.is_empty() {
+            Vec::new()
+        } else {
+            knixx_host::blescan::find_boards(&adapter, &want, Duration::from_secs(20))
+                .await
+                .map_err(anyhow::Error::msg)?
+        };
+
+        // 4. Push, parallel at a time.
+        let mut staged: Vec<u16> = Vec::new();
+        for group in others.chunks(parallel.max(1)) {
+            let pushes = group.iter().map(|s| {
+                let p = found.iter().find(|(a, _)| *a == s.ble).map(|(_, p)| p.clone());
+                let data = &data;
+                async move {
+                    let Some(p) = p else {
+                        return (s.from, Err(anyhow::anyhow!("not seen over BLE")));
+                    };
+                    let mut last = Err(anyhow::anyhow!("not tried"));
+                    for _ in 0..3 {
+                        last = push_to(&p, data, s.from).await;
+                        if last.is_ok() {
+                            break;
+                        }
+                    }
+                    let _ = p.disconnect().await;
+                    (s.from, last)
+                }
+            });
+            for (from, r) in futures_util::future::join_all(pushes).await {
+                match r {
+                    Ok(_) => {
+                        eprintln!("{}: staged", name(from));
+                        staged.push(from);
+                    }
+                    Err(e) => {
+                        eprintln!("{}: {e:#}", name(from));
+                        outcome.push((from, Outcome::Unreachable(format!("{e:#}"))));
+                    }
+                }
+            }
+        }
+        for s in &proxies {
+            match push_to(&proxy.p, &data, s.from).await {
+                Ok(_) => {
+                    eprintln!("{} (the proxy): staged", name(s.from));
+                    staged.push(s.from);
+                }
+                Err(e) => outcome.push((s.from, Outcome::Unreachable(format!("{e:#}")))),
+            }
+        }
+
+        // 5. Install one by one, the proxy last.
+        staged.sort_by_key(|f| proxies.iter().any(|p| p.from == *f));
+        for (i, from) in staged.iter().enumerate() {
+            if i > 0 {
+                tokio::time::sleep(stagger).await;
+            }
+            proxy
+                .send(*from, &Request::Install { counter: hdr.counter })
+                .await?;
+            let a = proxy.answers(Duration::from_secs(3), Some(*from)).await?;
+            match a.iter().find(|a| a.from == *from).map(|a| a.response) {
+                Some(Response::Installing) => outcome.push((*from, Outcome::Installing)),
+                Some(Response::Refused { reason }) => outcome.push((*from, Outcome::Refused(reason))),
+                _ => outcome.push((*from, Outcome::Staged)),
+            }
+        }
+        proxy.close().await;
+
+        // 6. Once they are back: what runs.
+        let installing = outcome
+            .iter()
+            .filter(|(_, o)| matches!(o, Outcome::Installing))
+            .count();
+        if installing > 0 {
+            eprintln!("{installing} board(s) installing; checking back in 70 s");
+            tokio::time::sleep(Duration::from_secs(70)).await;
+            let mut proxy = Proxy::connect(name_, addr, Duration::from_secs(60)).await?;
+            proxy.send(0, &Request::Scan).await?;
+            let back = proxy.answers(SCAN_WAIT, None).await?;
+            proxy.close().await;
+            for (from, o) in outcome.iter_mut() {
+                if !matches!(o, Outcome::Installing) {
+                    continue;
+                }
+                let now = back
+                    .iter()
+                    .find(|a| a.from == *from)
+                    .and_then(|a| match a.response {
+                        Response::Info { counter, .. } => Some(counter),
+                        _ => None,
+                    });
+                *o = match now {
+                    Some(c) if c == hdr.counter => Outcome::Current,
+                    Some(c) => Outcome::Unreachable(format!("runs counter {c} after the install")),
+                    None => Outcome::Unreachable("no answer after the install".into()),
+                };
+            }
+        }
+        outcome.sort_by_key(|(f, _)| *f);
+        println!("{:<10} outcome", "board");
+        let mut behind = 0;
+        for (from, o) in &outcome {
+            let text = match o {
+                Outcome::Current => "current".to_string(),
+                Outcome::Refused(r) => format!("refused ({r})"),
+                Outcome::Unreachable(e) => {
+                    behind += 1;
+                    format!("not updated: {e}")
+                }
+                Outcome::Staged => {
+                    behind += 1;
+                    "staged, not installed".to_string()
+                }
+                Outcome::Installing => "installing".to_string(),
+            };
+            println!("{:<10} {text}", name(*from));
+        }
+        if behind > 0 {
+            bail!("{behind} board(s) behind: run bolt fleet update again");
+        }
+        Ok(())
+    })
+}
+
+/// Pushes data to the board p, connecting first if need be.
+async fn push_to(p: &Peripheral, data: &[u8], from: u16) -> Result<u32> {
+    if !p.is_connected().await.unwrap_or(false) {
+        p.connect().await.context("connect")?;
+        p.discover_services().await.context("services")?;
+    }
+    let label = name(from);
+    let mut last_pct = usize::MAX;
+    crate::push::push_on(p, data, |acked| {
+        let pct = acked * 100 / data.len().max(1);
+        if pct / 10 != last_pct / 10 {
+            last_pct = pct;
+            eprintln!("{label}: {pct}%");
+        }
+    })
+    .await
+}

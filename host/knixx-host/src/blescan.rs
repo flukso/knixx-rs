@@ -17,6 +17,10 @@ pub struct Found {
     pub rssi: Option<i16>,
 }
 
+/// The company identifier of the manufacturer data in which a knixx board
+/// advertises its address.
+pub const KNIXX_COMPANY: u16 = 0xFFFF;
+
 /// Returns the first adapter of the computer.
 pub async fn adapter() -> Result<Adapter, String> {
     let manager = Manager::new().await.map_err(|e| format!("bluetooth: {e}"))?;
@@ -76,6 +80,54 @@ pub async fn find(adapter: &Adapter, name: &str, addr: &str, wait: Duration) -> 
         Ok(Some(f)) => Ok(f),
         _ => Err(format!("no BLE advertiser {target} after {wait:?}")),
     }
+}
+
+/// Scans for up to wait and returns the knixx boards seen, by the address
+/// in their manufacturer data, until all of want are found (or, with want
+/// empty, the whole wait).
+pub async fn find_boards(
+    adapter: &Adapter,
+    want: &[[u8; 6]],
+    wait: Duration,
+) -> Result<Vec<([u8; 6], Peripheral)>, String> {
+    let mut events = adapter.events().await.map_err(|e| format!("bluetooth: {e}"))?;
+    adapter
+        .start_scan(ScanFilter::default())
+        .await
+        .map_err(|e| format!("bluetooth: scan: {e}"))?;
+    let mut out: Vec<([u8; 6], Peripheral)> = Vec::new();
+    let _ = tokio::time::timeout(wait, async {
+        while let Some(ev) = events.next().await {
+            let (CentralEvent::DeviceDiscovered(id)
+            | CentralEvent::DeviceUpdated(id)
+            | CentralEvent::ManufacturerDataAdvertisement { id, .. }) = ev
+            else {
+                continue;
+            };
+            let Ok(p) = adapter.peripheral(&id).await else {
+                continue;
+            };
+            let Ok(Some(props)) = p.properties().await else {
+                continue;
+            };
+            let Some(addr) = props
+                .manufacturer_data
+                .get(&KNIXX_COMPANY)
+                .and_then(|d| <[u8; 6]>::try_from(d.as_slice()).ok())
+            else {
+                continue;
+            };
+            if !out.iter().any(|(a, _)| *a == addr) {
+                out.push((addr, p));
+            }
+            if !want.is_empty() && want.iter().all(|w| out.iter().any(|(a, _)| a == w)) {
+                return;
+            }
+        }
+    })
+    .await;
+    let _ = adapter.stop_scan().await;
+    Ok(out)
 }
 
 #[cfg(test)]

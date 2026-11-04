@@ -190,6 +190,11 @@ pub fn start(
 type Stack = trouble_host::Stack<'static, SoftdeviceController<'static>, DefaultPacketPool>;
 type Conn = GattConnection<'static, 'static, DefaultPacketPool>;
 
+/// The company identifier of the manufacturer data that carries the
+/// board's address: 0xFFFF, kept for tests and data without a registered
+/// company.
+pub const COMPANY: u16 = 0xFFFF;
+
 /// The board's BLE address, a static random one, stable across resets: the
 /// device ID, least significant byte first.
 pub fn address() -> [u8; 6] {
@@ -574,11 +579,18 @@ fn advertising(adv: &mut [u8; 31], scan: &mut [u8; 31]) -> (usize, usize) {
         adv,
     )
     .expect("advertising data");
-    let scan_len = match extra {
-        Some(u) => AdStructure::encode_slice(&[AdStructure::CompleteServiceUuids128(&[u])], scan)
-            .expect("scan response"),
-        None => 0,
+    // The board's address as manufacturer data, for hosts that do not show
+    // it (macOS): bolt fleet matches a board's scan answer by it.
+    let addr = address();
+    let id = AdStructure::ManufacturerSpecificData {
+        company_identifier: COMPANY,
+        payload: &addr,
     };
+    let scan_len = match extra {
+        Some(u) => AdStructure::encode_slice(&[AdStructure::CompleteServiceUuids128(&[u]), id], scan),
+        None => AdStructure::encode_slice(&[id], scan),
+    }
+    .expect("scan response");
     (len, scan_len)
 }
 
@@ -590,11 +602,16 @@ fn coded_advertising(adv: &mut [u8; ADV_DATA]) -> usize {
     let uuids = [knixx_gatt::SERVICE_UUID_LE, NUS_UUID_LE];
     #[cfg(not(feature = "web-ble"))]
     let uuids = [NUS_UUID_LE];
+    let addr = address();
     AdStructure::encode_slice(
         &[
             AdStructure::Flags(LE_GENERAL_DISCOVERABLE | BR_EDR_NOT_SUPPORTED),
             AdStructure::CompleteServiceUuids128(&uuids),
             AdStructure::CompleteLocalName(nus::NAME.as_bytes()),
+            AdStructure::ManufacturerSpecificData {
+                company_identifier: COMPANY,
+                payload: &addr,
+            },
         ],
         adv,
     )

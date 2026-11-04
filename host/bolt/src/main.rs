@@ -198,6 +198,21 @@ enum FleetCmd {
     },
     /// Shut a board's update window.
     Close { board: String },
+    /// Update every board to an image: scan, open, push in each window,
+    /// install one by one, and check.
+    Update {
+        #[arg(default_value = "build/thunder.kfw")]
+        file: PathBuf,
+        /// Boards pushed to at a time.
+        #[arg(long, default_value_t = 4)]
+        parallel: usize,
+        /// Seconds between two boards' installs.
+        #[arg(long, default_value_t = 2)]
+        stagger: u64,
+        /// How long each board's update window stays open, in minutes.
+        #[arg(long, default_value_t = 15)]
+        minutes: u8,
+    },
 }
 
 #[derive(Subcommand)]
@@ -323,6 +338,20 @@ fn main() -> Result<()> {
                 FleetCmd::Install { board, file } => {
                     fleet::request(&board, fleet::install_request(&file)?, &via, &via_addr, wait)
                 }
+                FleetCmd::Update {
+                    file,
+                    parallel,
+                    stagger,
+                    minutes,
+                } => fleet::update(
+                    &file,
+                    &via,
+                    &via_addr,
+                    wait,
+                    parallel,
+                    Duration::from_secs(stagger),
+                    minutes,
+                ),
                 FleetCmd::Close { board } => {
                     fleet::request(&board, knixx_knx::fw::Request::Close, &via, &via_addr, wait)
                 }

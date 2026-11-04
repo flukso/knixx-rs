@@ -28,8 +28,6 @@ jobs:
         run: |
           cargo clippy --all-targets -- -D warnings
           (cd firmware && cargo clippy --release -- -D warnings)
-          (cd firmware && cargo clippy --release --features web-ble -- -D warnings)
-          (cd firmware && cargo clippy --release --features web-ble,coded-phy -- -D warnings)
       - name: Format
         run: |
           cargo fmt --check
@@ -44,12 +42,8 @@ jobs:
           export CPATH="$PWD/firmware/c-include"
           for c in crates/*; do (cd $c && cargo build --target thumbv7em-none-eabihf $(test $c = crates/knixx-script && echo --no-default-features --features no_std)) || exit 1; done
       - name: Firmware build and size
-        run: |
-          cargo xtask build --no-scripts
-          cargo xtask build --web-ble --no-scripts
-          cargo xtask build --web-ble
-          cargo xtask build --web-ble --coded-phy
-          cargo xtask build
+        # The one build, every feature in: build/thunder.*.
+        run: cargo xtask build
       - name: cargo-bloat
         uses: taiki-e/install-action@v2
         with:

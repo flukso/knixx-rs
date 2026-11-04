@@ -31,41 +31,19 @@ jobs:
       - name: flip-link
         run: cargo install flip-link --locked
       - name: Build
-        # build/knixx.{elf,uf2,hex} and build/knixx-dfu.zip; the web-ble
-        # build, with the knixx GATT service for the web app, as
-        # knixx-web-ble.*, and that build with the coded PHY too as
-        # knixx-web-ble-coded.*, for the tags that have the features.
-        run: |
-          keep_as() {
-            for f in knixx.elf knixx.uf2 knixx.hex knixx-dfu.zip; do
-              mv build/$f build/${f/knixx/$1}
-            done
-          }
-          if grep -q '^web-ble' firmware/knixx-fw/Cargo.toml; then
-            cargo xtask build --web-ble
-            keep_as knixx-web-ble
-          fi
-          if grep -q '^coded-phy' firmware/knixx-fw/Cargo.toml; then
-            cargo xtask build --web-ble --coded-phy
-            keep_as knixx-web-ble-coded
-          fi
-          cargo xtask build
+        # The one build, every feature in: build/thunder.{elf,uf2,hex} and
+        # build/thunder-dfu.zip. Tags up to v0.5.1 build knixx.* files in
+        # three builds, which this workflow no longer collects.
+        run: cargo xtask build
       - uses: actions/upload-artifact@v4
         with:
           name: firmware
+          if-no-files-found: error
           path: |
-            build/knixx.elf
-            build/knixx.uf2
-            build/knixx.hex
-            build/knixx-dfu.zip
-            build/knixx-web-ble.elf
-            build/knixx-web-ble.uf2
-            build/knixx-web-ble.hex
-            build/knixx-web-ble-dfu.zip
-            build/knixx-web-ble-coded.elf
-            build/knixx-web-ble-coded.uf2
-            build/knixx-web-ble-coded.hex
-            build/knixx-web-ble-coded-dfu.zip
+            build/thunder.elf
+            build/thunder.uf2
+            build/thunder.hex
+            build/thunder-dfu.zip
 
   bolt:
     strategy:

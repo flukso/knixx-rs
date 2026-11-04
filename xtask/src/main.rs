@@ -67,6 +67,9 @@ tasks:
           report its version over USB and advertise as knixx over BLE
   web     serve the web app on localhost with trunk, rebuilt on changes;
           --build only builds it into web/dist/ [trunk flags]
+  keygen  <number> <name> <seed file>: make a signing key; its seed goes
+          to <seed file> (keep it secret, e.g. as the release workflow's
+          KNIXX_SIGNING_KEY), its public key to keys/<number>-<name>.pub
 ";
 
 /// The firmware features a build takes from its flags.
@@ -127,6 +130,7 @@ fn main() -> Result<()> {
         Some("genfw") => genfw(&args[1..]),
         Some("cad") => cad::run(&args[1..]),
         Some("web") => web(&rest),
+        Some("keygen") => keygen(&args[1..]),
         Some("term") => {
             let mut a = vec!["term".to_string()];
             a.extend_from_slice(&args[1..]);
@@ -677,6 +681,31 @@ fn gdb(probe: &str, cmds: &[String]) -> Result<()> {
     if !o.status.success() || text.contains("Error") {
         bail!("arm-none-eabi-gdb failed:\n{text}");
     }
+    Ok(())
+}
+
+/// Makes a signing key: the seed to a file of its own, readable by its
+/// owner only, the public key to keys/, for the builds to take.
+fn keygen(args: &[String]) -> Result<()> {
+    let [id, name, seed_file] = args else {
+        bail!("usage: cargo xtask keygen <number> <name> <seed file>");
+    };
+    let id: u8 = id.parse().context("the key number")?;
+    if id == sign::DEV_ID {
+        bail!("key 0 is the developer's, made on first build");
+    }
+    let pub_file = root().join(format!("keys/{id}-{name}.pub"));
+    if pub_file.exists() {
+        bail!("{} exists", pub_file.display());
+    }
+    let seed = sign::random_seed().map_err(anyhow::Error::msg)?;
+    sign::write_private(Path::new(seed_file), &format!("{}\n", sign::hex(&seed)))
+        .map_err(anyhow::Error::msg)?;
+    fs::create_dir_all(root().join("keys"))?;
+    fs::write(&pub_file, format!("{}\n", sign::hex(&sign::public_key(&seed))))?;
+    eprintln!(
+        "key {id}: the seed in {seed_file} (keep it secret, store it as KNIXX_SIGNING_KEY), the public key in keys/{id}-{name}.pub (commit it)"
+    );
     Ok(())
 }
 

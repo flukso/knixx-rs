@@ -4,6 +4,11 @@
 [workspace]
 resolver = "3"
 members = ["knixx-fw", "knixx-qspi", "knixx-boot"]
+# The firmware and the bootloader each build on their own: their critical
+# sections (MPSL's, and the bootloader's single-core one) cannot be
+# unified into one build. cargo build -p knixx-boot --profile boot builds
+# the bootloader.
+default-members = ["knixx-fw"]
 
 [profile.release]
 opt-level = "s"

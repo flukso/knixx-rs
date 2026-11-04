@@ -31,19 +31,29 @@ jobs:
       - name: flip-link
         run: cargo install flip-link --locked
       - name: Build
-        # The one build, every feature in: build/thunder.{elf,uf2,hex} and
-        # build/thunder-dfu.zip. Tags up to v0.5.1 build knixx.* files in
-        # three builds, which this workflow no longer collects.
-        run: cargo xtask build
+        # The bootloader and the firmware, every feature in, the image
+        # signed with the release key (key 1, keys/1-release.pub):
+        # build/thunder.{kfw,elf} and build/thunder-boot.{hex,elf}. Tags up
+        # to v0.5.1 build knixx.* or thunder.uf2 instead, which this
+        # workflow does not collect.
+        env:
+          KNIXX_SIGNING_KEY: ${{ secrets.KNIXX_SIGNING_KEY }}
+          KNIXX_SIGNING_KEY_ID: "1"
+        run: |
+          if [ -z "$KNIXX_SIGNING_KEY" ]; then
+            echo "the KNIXX_SIGNING_KEY secret is not set: cargo xtask keygen 1 release <seed file>" >&2
+            exit 1
+          fi
+          cargo xtask build
       - uses: actions/upload-artifact@v4
         with:
           name: firmware
           if-no-files-found: error
           path: |
+            build/thunder.kfw
             build/thunder.elf
-            build/thunder.uf2
-            build/thunder.hex
-            build/thunder-dfu.zip
+            build/thunder-boot.hex
+            build/thunder-boot.elf
 
   bolt:
     strategy:

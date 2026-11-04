@@ -28,6 +28,7 @@ jobs:
         run: |
           cargo clippy --all-targets -- -D warnings
           (cd firmware && cargo clippy --release -- -D warnings)
+          (cd firmware && cargo clippy --profile boot -p knixx-boot -- -D warnings)
       - name: Format
         run: |
           cargo fmt --check
@@ -42,14 +43,19 @@ jobs:
           export CPATH="$PWD/firmware/c-include"
           for c in crates/*; do (cd $c && cargo build --target thumbv7em-none-eabihf $(test $c = crates/knixx-script && echo --no-default-features --features no_std)) || exit 1; done
       - name: Firmware build and size
-        # The one build, every feature in: build/thunder.*.
+        # The one build, every feature in, and the bootloader:
+        # build/thunder.* and build/thunder-boot.*, signed with a
+        # developer's key made on the runner.
         run: cargo xtask build
       - name: cargo-bloat
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-bloat
       - name: Flash by crate
-        run: cd firmware && cargo bloat --release --crates -n 20
+        run: |
+          cd firmware
+          cargo bloat --release -p knixx-fw --crates -n 20
+          cargo bloat --profile boot -p knixx-boot --crates -n 20
       - name: Licenses
         uses: EmbarkStudios/cargo-deny-action@v2
         with:

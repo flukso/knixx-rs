@@ -519,6 +519,8 @@ pub mod result {
     pub const READ: u8 = 0x31;
 }
 
+pub mod stage;
+
 /// Signing, on the host: the release workflow and cargo xtask build.
 #[cfg(any(test, feature = "sign"))]
 pub mod sign {
@@ -550,5 +552,7 @@ pub mod sign {
     }
 }
 
+#[cfg(test)]
+mod stage_tests;
 #[cfg(test)]
 mod tests;

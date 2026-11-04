@@ -295,7 +295,7 @@ mod tests {
     /// file.
     #[test]
     fn build_hex() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../build/knixx.hex");
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../build/thunder.hex");
         let Ok(text) = std::fs::read_to_string(path) else {
             return;
         };

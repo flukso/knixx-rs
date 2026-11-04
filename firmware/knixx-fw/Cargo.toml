@@ -34,14 +34,17 @@ bt-hci = { version = "0.10.1", default-features = false }
 trouble-host = { version = "0.8.0", default-features = false, features = ["peripheral", "gatt", "default-packet-pool", "derive", "security", "security-p256-cortex-m4"] }
 
 [features]
-default = ["scripts"]
+# Every feature is in by default: the one build, thunder.uf2. cargo xtask
+# build --no-scripts, --no-web-ble and --no-coded-phy leave them out.
+default = ["scripts", "web-ble", "coded-phy"]
 # Scripts in Rhai Grain, with the heap that only they use. Without it the
 # firmware links no allocator.
 scripts = ["dep:rlsf", "dep:knixx-script"]
 # The knixx GATT service, for a web app on Web Bluetooth: group value writes,
 # reads and responses through the board, and the group telegrams on the bus.
+# It serves only with ble.knixx on.
 web-ble = []
 # Long-range advertising and connections on the LE Coded PHY, next to 1M:
 # the controller's multirole library (extended advertising, coded PHY) and
-# trouble's extended advertising.
+# trouble's extended advertising. The coded set is on only with ble.coded on.
 coded-phy = ["nrf-sdc/multirole", "trouble-host/extended-advertising"]

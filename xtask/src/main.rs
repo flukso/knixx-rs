@@ -1,7 +1,8 @@
 //! cargo xtask <task>: the build and flash tasks of knixx-rs.
 //!
-//!     build   build the firmware and write build/knixx.{elf,uf2,hex} and
-//!             the DFU package build/knixx-dfu.zip
+//!     build   build the firmware, every feature in, and write
+//!             build/thunder.{elf,uf2,hex} and the DFU package
+//!             build/thunder-dfu.zip
 //!     flash   build, flash over USB and check the board runs the build
 //!     ota     build, then send the DFU package over BLE with bolt ota
 //!     term    a terminal on the board's console with bolt term
@@ -32,19 +33,25 @@ use knixx_host::{flash, uf2};
 const APP_START: u32 = 0x26000;
 const APP_END: u32 = 0xED000;
 
+/// The name of the firmware's files in build/: thunder.uf2 and the others.
+const ARTIFACT: &str = "thunder";
+
 const USAGE: &str = "usage: cargo xtask <task>
 
 tasks:
-  build   build the firmware and write build/knixx.{elf,uf2,hex} and the
-          DFU package build/knixx-dfu.zip [--no-scripts: without Rhai
-          Grain and its heap, so that no allocator is linked] [--web-ble:
-          with the knixx GATT service for the web app] [--coded-phy: with
-          advertising and connections on the LE Coded PHY]
+  build   build the firmware, every feature in, and write
+          build/thunder.{elf,uf2,hex} and the DFU package
+          build/thunder-dfu.zip; flags leave features out: [--no-scripts:
+          without Rhai Grain and its heap, so that no allocator is linked]
+          [--no-web-ble: without the knixx GATT service for the web app]
+          [--no-coded-phy: without advertising and connections on the LE
+          Coded PHY]
   flash   build, flash over USB and check the board runs the build
-          [--port <serial port>] [--no-scripts] [--web-ble] [--coded-phy]
-  ota     build, then send build/knixx-dfu.zip over BLE to a board in BLE
-          DFU mode (run ota on its console) [--no-scripts] [--web-ble]
-          [--coded-phy]
+          [--port <serial port>] [--no-scripts] [--no-web-ble]
+          [--no-coded-phy]
+  ota     build, then send build/thunder-dfu.zip over BLE to a board in BLE
+          DFU mode (run ota on its console) [--no-scripts] [--no-web-ble]
+          [--no-coded-phy]
           [bolt ota flags, e.g. --addr]
   term    a terminal on the console, over USB or BLE [bolt term flags]
   golden  record crates/knixx-vl53l7cx/testdata/configure.golden with ST's
@@ -68,33 +75,45 @@ struct Features {
 }
 
 impl Features {
-    /// Takes --no-scripts, --web-ble and --coded-phy out of args.
-    fn take(args: &[String]) -> (Features, Vec<String>) {
+    /// Takes --no-scripts, --no-web-ble and --no-coded-phy out of args:
+    /// every feature is in unless a flag leaves it out. The flags that
+    /// once added features are refused, as they are in already.
+    fn take(args: &[String]) -> Result<(Features, Vec<String>)> {
         let mut f = Features {
             scripts: true,
-            web_ble: false,
-            coded_phy: false,
+            web_ble: true,
+            coded_phy: true,
         };
         let mut rest = Vec::new();
         for a in args {
             match a.as_str() {
                 "--no-scripts" => f.scripts = false,
-                "--web-ble" => f.web_ble = true,
-                "--coded-phy" => f.coded_phy = true,
+                "--no-web-ble" => f.web_ble = false,
+                "--no-coded-phy" => f.coded_phy = false,
+                "--web-ble" | "--coded-phy" => bail!(
+                    "{} is built in by default; --no-{} leaves it out",
+                    &a[2..],
+                    &a[2..]
+                ),
                 _ => rest.push(a.clone()),
             }
         }
-        (f, rest)
+        Ok((f, rest))
+    }
+
+    /// Whether every feature is in, the default build.
+    fn all(self) -> bool {
+        self.scripts && self.web_ble && self.coded_phy
     }
 }
 
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
-    let (features, rest) = Features::take(args.get(1..).unwrap_or(&[]));
+    let (features, rest) = Features::take(args.get(1..).unwrap_or(&[]))?;
     match args.first().map(String::as_str) {
         Some("build") => {
             if !rest.is_empty() {
-                bail!("usage: cargo xtask build [--no-scripts] [--web-ble] [--coded-phy]");
+                bail!("usage: cargo xtask build [--no-scripts] [--no-web-ble] [--no-coded-phy]");
             }
             build_with(features).map(|_| ())
         }
@@ -105,7 +124,11 @@ fn main() -> Result<()> {
         Some("cad") => cad::run(&args[1..]),
         Some("ota") => {
             build_with(features)?;
-            let mut a = vec!["ota".to_string(), "--zip".into(), "build/knixx-dfu.zip".into()];
+            let mut a = vec![
+                "ota".to_string(),
+                "--zip".into(),
+                format!("build/{ARTIFACT}-dfu.zip"),
+            ];
             a.extend_from_slice(&rest);
             bolt(&a)
         }
@@ -163,24 +186,29 @@ impl Version {
     }
 }
 
-/// Builds the firmware and writes build/knixx.elf, .uf2 and .hex. It fails
-/// when the image does not fit the application's flash, and on the heap
-/// rule: with scripts the allocator is the heap of Rhai Grain; without
-/// them no allocator may be linked.
+/// Builds the firmware and writes build/thunder.elf, .uf2 and .hex, and the
+/// DFU package build/thunder-dfu.zip. It fails when the image does not fit
+/// the application's flash, and on the heap rule: with scripts the
+/// allocator is the heap of Rhai Grain; without them no allocator may be
+/// linked.
 fn build_with(f: Features) -> Result<(PathBuf, Version)> {
     let scripts = f.scripts;
     let v = Version::now();
     let mut cargo = Command::new(env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
     cargo.args(["build", "--release"]);
-    if !scripts {
+    if !f.all() {
         cargo.arg("--no-default-features");
-    }
-    let features: Vec<&str> = [(f.web_ble, "web-ble"), (f.coded_phy, "coded-phy")]
+        let features: Vec<&str> = [
+            (f.scripts, "scripts"),
+            (f.web_ble, "web-ble"),
+            (f.coded_phy, "coded-phy"),
+        ]
         .into_iter()
         .filter_map(|(on, name)| on.then_some(name))
         .collect();
-    if !features.is_empty() {
-        cargo.args(["--features", &features.join(",")]);
+        if !features.is_empty() {
+            cargo.args(["--features", &features.join(",")]);
+        }
     }
     let status = cargo
         .current_dir(root().join("firmware"))
@@ -210,20 +238,21 @@ fn build_with(f: Features) -> Result<(PathBuf, Version)> {
     }
     let out = root().join("build");
     fs::create_dir_all(&out)?;
-    fs::write(out.join("knixx.elf"), &data)?;
-    fs::write(out.join("knixx.uf2"), img.to_uf2(uf2::FAMILY_NRF52840))?;
+    let uf2_file = out.join(format!("{ARTIFACT}.uf2"));
+    fs::write(out.join(format!("{ARTIFACT}.elf")), &data)?;
+    fs::write(&uf2_file, img.to_uf2(uf2::FAMILY_NRF52840))?;
     let hex = img.to_hex();
-    fs::write(out.join("knixx.hex"), &hex)?;
-    // The package of bolt genpkg build/knixx.hex: from the hex file, whose
+    fs::write(out.join(format!("{ARTIFACT}.hex")), &hex)?;
+    // The package of bolt genpkg build/thunder.hex: from the hex file, whose
     // image genpkg rounds up to a multiple of 4.
     let ip = InitPacket::feather();
     let (_, bin) = read_hex(&hex)?;
     let mut zip = std::io::Cursor::new(Vec::new());
-    Package::new(bin, &ip).write_zip(&mut zip, "knixx", &ip)?;
-    fs::write(out.join("knixx-dfu.zip"), zip.into_inner())?;
+    Package::new(bin, &ip).write_zip(&mut zip, ARTIFACT, &ip)?;
+    fs::write(out.join(format!("{ARTIFACT}-dfu.zip")), zip.into_inner())?;
     let used = img.end() - APP_START;
     eprintln!(
-        "build/knixx.uf2: version {} built {}, {used} of {} bytes of flash ({}%)",
+        "build/{ARTIFACT}.uf2: version {} built {}, {used} of {} bytes of flash ({}%)",
         v.commit,
         v.date,
         APP_END - APP_START,
@@ -239,7 +268,7 @@ fn build_with(f: Features) -> Result<(PathBuf, Version)> {
             "no allocator".to_string()
         }
     );
-    Ok((out.join("knixx.uf2"), v))
+    Ok((uf2_file, v))
 }
 
 /// Builds ST's VL53L7CX driver with the harness for the host, runs it

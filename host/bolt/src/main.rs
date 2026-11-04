@@ -75,7 +75,7 @@ enum Cmd {
     /// console first).
     Ota {
         /// The DFU package, as cargo xtask build makes it.
-        #[arg(long, default_value = "build/knixx-dfu.zip")]
+        #[arg(long, default_value = "build/thunder-dfu.zip")]
         zip: PathBuf,
         /// The advertised name of the bootloader.
         #[arg(long, default_value = "AdaDFU")]
@@ -122,7 +122,7 @@ enum Cmd {
     /// drive and wait for the board to come back.
     Uf2 {
         /// The UF2 file.
-        #[arg(default_value = "build/knixx.uf2")]
+        #[arg(default_value = "build/thunder.uf2")]
         file: PathBuf,
         /// The serial port of the running board, instead of finding it.
         #[arg(long)]

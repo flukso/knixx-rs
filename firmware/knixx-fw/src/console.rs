@@ -191,10 +191,10 @@ impl knixx_cli::Ctx for Ctx {
 
     fn check(&self, dev: &Device) -> Result<(), &'static str> {
         if dev.ble.knixx && !cfg!(feature = "web-ble") {
-            return Err("the knixx service is not built in (cargo xtask build --web-ble)");
+            return Err("the knixx service is not built in (a --no-web-ble build)");
         }
         if dev.ble.coded && !cfg!(feature = "coded-phy") {
-            return Err("coded PHY is not built in (cargo xtask build --coded-phy)");
+            return Err("coded PHY is not built in (a --no-coded-phy build)");
         }
         Ok(())
     }

@@ -323,7 +323,7 @@ mod tests {
     /// The RAM of the firmware, when cargo xtask build made its ELF file.
     #[test]
     fn firmware_ram() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../build/knixx.elf");
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../build/thunder.elf");
         let Ok(data) = std::fs::read(path) else {
             return;
         };

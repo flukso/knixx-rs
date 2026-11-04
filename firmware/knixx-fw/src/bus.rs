@@ -53,6 +53,7 @@ impl Output for Console {
     }
 
     fn telegram(&mut self, _tg: &knixx_knx::tp1::Telegram, _own: bool) {
+        crate::fw_knx::telegram(_tg, _own);
         #[cfg(feature = "scripts")]
         crate::runner::telegram(_tg, _own);
         #[cfg(feature = "web-ble")]

@@ -100,6 +100,11 @@ pub enum Tag {
     Script,
     /// The knixx GATT service, with the central's sequence number.
     Gatt(u8),
+    /// The firmware update control plane (knixx_knx::fw): a user
+    /// manufacturer info read or response, to an individual address or the
+    /// broadcast 0/0/0, with the central's sequence number when the knixx
+    /// service's knx characteristic sent it.
+    Fw(u8),
 }
 
 /// Receives everything the engine prints, and the telegrams on the bus.
@@ -221,6 +226,28 @@ enum SendError {
     Ncn(ncn::Error),
 }
 
+/// The hop count of the control plane's telegrams, so that line couplers
+/// pass them on.
+const FW_ROUTING: u8 = 6;
+
+/// Why the engine refuses a telegram of the control plane: only user
+/// messages (A_UserManufacturerInfo_Read and _Response), to an individual
+/// address or to the broadcast.
+fn refuse_fw(tg: &Telegram) -> Option<&'static str> {
+    let broadcast = tg.npci.addr_type == AddrType::Group && tg.dest == 0;
+    let individual = tg.npci.addr_type == AddrType::Individual && tg.dest != 0;
+    if !broadcast && !individual {
+        return Some("not to an individual address or the broadcast");
+    }
+    if tg.apci != Apci::UserMessage {
+        return Some("not a user message");
+    }
+    if tg.npci.length == 0 || tg.npci.length as usize > tp1::MAX_PAYLOAD {
+        return Some("bad data length");
+    }
+    None
+}
+
 /// Why the engine refuses a telegram of a script.
 fn refuse(tg: &Telegram) -> Option<&'static str> {
     if tg.npci.addr_type != AddrType::Group || tg.dest == 0 {
@@ -301,6 +328,10 @@ pub struct Engine<'a> {
     /// stat_deadline while rx.stat is set.
     stat_req: bool,
     stat_deadline: Instant,
+    /// The transceiver is to learn the individual address: at start and
+    /// after it changed.
+    set_address: bool,
+    set_address_req: [u8; 4],
     occ: Occupancy,
     tx: Sender,
 }
@@ -330,6 +361,8 @@ impl<'a> Engine<'a> {
             con_deadline: Instant::MIN,
             stat_req: false,
             stat_deadline: Instant::MIN,
+            set_address: true,
+            set_address_req: [0; 4],
             occ: Occupancy {
                 on: false,
                 last: Instant::MIN,
@@ -401,7 +434,9 @@ impl<'a> Engine<'a> {
             }
             Command::Stat => self.stat_req = true,
             Command::Send { tg, tag } => {
-                if let Some(why) = refuse(&tg) {
+                let fw = matches!(tag, Tag::Fw(_));
+                let why = if fw { refuse_fw(&tg) } else { refuse(&tg) };
+                if let Some(why) = why {
                     let g = GroupAddress(tg.dest);
                     errorln(&mut self.rx.line, out, format_args!("bus: send to {g}: {why}"));
                     out.sent(tag, Status::Refused);
@@ -410,9 +445,16 @@ impl<'a> Engine<'a> {
                 let mut t = self.cur.group_write(tg.dest, tg.data());
                 t.apci = tg.apci;
                 t.ctrl.priority = tg.ctrl.priority;
+                if fw {
+                    t.npci.addr_type = tg.npci.addr_type;
+                    t.npci.routing = FW_ROUTING;
+                }
                 self.script = Some((t, tag));
             }
             Command::Config(dev) => {
+                if dev.individual != self.cur.individual {
+                    self.set_address = true;
+                }
                 self.cur = dev;
                 self.rx.dec.reset();
             }
@@ -476,6 +518,11 @@ impl<'a> Engine<'a> {
                 return None;
             }
             self.end_stat(out);
+        }
+        if self.set_address && !self.awaiting {
+            self.set_address = false;
+            self.set_address_req = ncn::set_address(self.cur.individual);
+            return Some(&self.set_address_req);
         }
         if self.stat_req {
             self.stat_req = false;

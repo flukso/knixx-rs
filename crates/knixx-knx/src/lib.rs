@@ -6,6 +6,7 @@ extern crate std;
 
 pub mod address;
 pub mod dpt;
+pub mod fw;
 pub mod gatt;
 pub mod tp1;
 

@@ -90,7 +90,7 @@ const NUS_UUID_LE: [u8; 16] = [
 
 /// The size of the attribute table: the services' attributes, and the GAP
 /// and GATT services that ble_task adds, Service Changed included.
-const ATTRIBUTES: usize = 48;
+const ATTRIBUTES: usize = 52;
 
 /// The GATT database as centrals see it: the Service Changed
 /// characteristic, and the hash of the database, which bonds keep.
@@ -190,14 +190,19 @@ pub fn start(
 type Stack = trouble_host::Stack<'static, SoftdeviceController<'static>, DefaultPacketPool>;
 type Conn = GattConnection<'static, 'static, DefaultPacketPool>;
 
-#[embassy_executor::task]
-async fn ble_task(sdc: SoftdeviceController<'static>) -> ! {
-    // A static random address, stable across resets: the device ID.
+/// The board's BLE address, a static random one, stable across resets: the
+/// device ID, least significant byte first.
+pub fn address() -> [u8; 6] {
     let ficr = embassy_nrf::pac::FICR;
     let id = (u64::from(ficr.deviceid(1).read()) << 32) | u64::from(ficr.deviceid(0).read());
     let mut addr = id.to_le_bytes();
     addr[5] |= 0xC0; // static random
-    let address = Address::random([addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]]);
+    [addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]]
+}
+
+#[embassy_executor::task]
+async fn ble_task(sdc: SoftdeviceController<'static>) -> ! {
+    let address = Address::random(address());
 
     // One bond more than bonds::MAX: the host stores a new bond itself, so
     // it needs room for it before the oldest is dropped.
@@ -772,7 +777,14 @@ fn guarded(server: &Server, handle: u16) -> bool {
         let k = &server.knixx;
         if handle == k.send.handle
             || handle == k.rssi.handle
-            || [k.result.cccd_handle, k.group.cccd_handle, k.rssi.cccd_handle].contains(&Some(handle))
+            || handle == k.knx.handle
+            || [
+                k.result.cccd_handle,
+                k.group.cccd_handle,
+                k.rssi.cccd_handle,
+                k.knx.cccd_handle,
+            ]
+            .contains(&Some(handle))
         {
             return true;
         }
@@ -891,6 +903,12 @@ async fn events(stack: &'static Stack, server: &'static Server<'static>, conn: &
                     && w.handle() == server.knixx.send.handle
                 {
                     w.with_data(|_, data| knixx_gatt::write(data));
+                }
+                #[cfg(feature = "web-ble")]
+                if let GattEvent::Write(w) = &event
+                    && w.handle() == server.knixx.knx.handle
+                {
+                    w.with_data(|_, data| knixx_gatt::write_knx(data));
                 }
                 if let Ok(reply) = event.accept() {
                     reply.send().await;

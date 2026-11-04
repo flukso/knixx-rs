@@ -18,6 +18,16 @@ pub const U_SET_BUSY_REQ: u8 = 0x03;
 pub const U_QUIT_BUSY_REQ: u8 = 0x04;
 pub const U_BUSMON_REQ: u8 = 0x05;
 pub const U_SYSTEM_STAT_REQ: u8 = 0x0d;
+/// Sets the transceiver's individual address, so that it acks the
+/// telegrams addressed to it on layer 2: the address high and low octets,
+/// then a dummy octet.
+pub const U_SET_ADDRESS_REQ: u8 = 0xf1;
+
+/// The U_SetAddress.req of addr.
+pub fn set_address(addr: u16) -> [u8; 4] {
+    let [hi, lo] = addr.to_be_bytes();
+    [U_SET_ADDRESS_REQ, hi, lo, 0]
+}
 pub const U_L_DATA_START_REQ: u8 = 0x80;
 pub const U_L_DATA_END_REQ: u8 = 0x40;
 

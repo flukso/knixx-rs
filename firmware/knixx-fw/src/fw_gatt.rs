@@ -115,6 +115,23 @@ pub async fn window_change() {
     }
 }
 
+/// The code of the last failed image, 0 for none.
+static LAST_ERROR: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
+/// The code of the last failed image over the service, 0 for none.
+pub fn last_error() -> u8 {
+    LAST_ERROR.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// How much of the incoming image is in, in percent; 0 without one.
+pub fn progress() -> u8 {
+    upload().lock(|u| {
+        u.borrow().as_ref().map_or(0, |up| {
+            (u64::from(up.stager.received()) * 100 / u64::from(up.stager.size().max(1))) as u8
+        })
+    })
+}
+
 /// Whether an image is coming in over the service.
 pub fn busy() -> bool {
     upload().lock(|u| u.borrow().is_some())
@@ -132,6 +149,7 @@ fn notify_offset(kind: u8, off: u32) {
 }
 
 fn notify_error(code: u8, reason: &dyn core::fmt::Display) {
+    LAST_ERROR.store(code, core::sync::atomic::Ordering::Relaxed);
     let mut s: heapless::String<18> = heapless::String::new();
     let _ = write!(s, "{reason}");
     let mut b: heapless::Vec<u8, 20> = heapless::Vec::new();
@@ -253,6 +271,7 @@ pub fn data(write: &[u8]) {
     }
     match up.stager.finish(&mut Fs, Some(up.crc)) {
         Ok(h) => {
+            LAST_ERROR.store(0, core::sync::atomic::Ordering::Relaxed);
             let c = h.counter.to_le_bytes();
             notify(&[DONE, c[0], c[1], c[2], c[3]]);
         }

@@ -79,11 +79,12 @@ pub fn take_pending() -> Option<(u32, u32)> {
     PENDING.lock(|p| p.take())
 }
 
-/// At boot: removes the staged image once it runs.
+/// At boot: removes the staged image once it runs, or when it is no newer
+/// than what runs, so that it could never install.
 pub fn tidy() {
     LAST_RESULT.store(boot::last_result(), Ordering::Relaxed);
     if let (Some(s), Some(r)) = (stage::staged(&mut Fs), boot::header())
-        && s == r
+        && s.counter <= r.counter
     {
         let _ = Fs.remove(image::STAGED_PATH);
     }

@@ -11,6 +11,7 @@
 
 mod ble;
 mod client;
+mod fleet;
 mod fw;
 mod input;
 mod push;
@@ -102,6 +103,21 @@ enum Cmd {
         #[command(subcommand)]
         cmd: FwCmd,
     },
+    /// The boards of an installation, through one proxy board that this
+    /// computer is paired with, over the KNX control plane.
+    Fleet {
+        #[command(subcommand)]
+        cmd: FleetCmd,
+        /// The advertised name of the proxy.
+        #[arg(long, default_value = "knixx", global = true)]
+        via: String,
+        /// The BLE address of the proxy instead of its name.
+        #[arg(long, default_value = "", global = true)]
+        via_addr: String,
+        /// How long to wait for the proxy, in seconds.
+        #[arg(long, default_value_t = 30, global = true)]
+        wait: u64,
+    },
     /// The scripts of the board: make one from the template, build it to
     /// bytecode, upload it, list and remove the ones on the board.
     Script {
@@ -155,6 +171,33 @@ impl Board {
             wait: Duration::from_secs(self.wait),
         }
     }
+}
+
+#[derive(Subcommand)]
+enum FleetCmd {
+    /// List the boards that answer a scan on the bus.
+    Scan,
+    /// Show what a board runs and has staged.
+    Status {
+        /// The board's individual address, such as 1.1.5.
+        board: String,
+    },
+    /// Open a board's update window for an image.
+    Open {
+        board: String,
+        #[arg(default_value = "build/thunder.kfw")]
+        file: PathBuf,
+        #[arg(long, default_value_t = 10)]
+        minutes: u8,
+    },
+    /// Have a board install its staged image, if it is this one.
+    Install {
+        board: String,
+        #[arg(default_value = "build/thunder.kfw")]
+        file: PathBuf,
+    },
+    /// Shut a board's update window.
+    Close { board: String },
 }
 
 #[derive(Subcommand)]
@@ -260,6 +303,31 @@ fn main() -> Result<()> {
         })
         .map_err(anyhow::Error::msg),
         Cmd::Scan { name, addr, wait } => scan(&name, &addr, wait),
+        Cmd::Fleet {
+            cmd,
+            via,
+            via_addr,
+            wait,
+        } => {
+            let wait = Duration::from_secs(wait);
+            match cmd {
+                FleetCmd::Scan => fleet::scan(&via, &via_addr, wait),
+                FleetCmd::Status { board } => fleet::status(&board, &via, &via_addr, wait),
+                FleetCmd::Open { board, file, minutes } => fleet::request(
+                    &board,
+                    fleet::open_request(&file, minutes)?,
+                    &via,
+                    &via_addr,
+                    wait,
+                ),
+                FleetCmd::Install { board, file } => {
+                    fleet::request(&board, fleet::install_request(&file)?, &via, &via_addr, wait)
+                }
+                FleetCmd::Close { board } => {
+                    fleet::request(&board, knixx_knx::fw::Request::Close, &via, &via_addr, wait)
+                }
+            }
+        }
         Cmd::Fw { cmd } => match cmd {
             FwCmd::Put { file, install, board } => fw::put(&file, &board.target(), install),
             FwCmd::Install { board } => fw::install(&board.target()),

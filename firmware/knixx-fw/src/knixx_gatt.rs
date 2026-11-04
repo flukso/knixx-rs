@@ -6,7 +6,7 @@
 //! every link::READ_PERIOD: a browser cannot read it of a connected device. While
 //! ble.pair is on, only a paired central gets in, as for NUS (see ble).
 
-use embassy_futures::select::{Either, select};
+use embassy_futures::select::{Either3, select3};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use knixx_bus::{Command, Status, Tag};
@@ -34,6 +34,12 @@ pub struct KnixxService {
     pub group: heapless::Vec<u8, MAX_VALUE>,
     #[characteristic(uuid = "6b6e7805-1b5d-4c8e-a2f0-3e5b9d8c7a10", read, notify)]
     pub rssi: i8,
+    /// The firmware update's control plane (knixx_knx::fw): writes [seq,
+    /// dest u16 big-endian (0: the broadcast), the telegram's data]; the
+    /// outcome on result; notifications [src u16 big-endian, the data] of
+    /// the answers to this board.
+    #[characteristic(uuid = "6b6e7806-1b5d-4c8e-a2f0-3e5b9d8c7a10", write, notify)]
+    pub knx: heapless::Vec<u8, MAX_VALUE>,
 }
 
 /// The outcomes of the central's sends, by seq.
@@ -62,8 +68,19 @@ pub fn telegram(tg: &Telegram, own: bool) {
 
 /// Queues the outcome of a send of the central.
 pub fn sent(tag: Tag, status: Status) {
-    if let Tag::Gatt(seq) = tag {
+    if let Tag::Gatt(seq) | Tag::Fw(seq) = tag {
         let _ = RESULTS.try_send((seq, status));
+    }
+}
+
+/// Handles a write of the knx characteristic: a request of the control
+/// plane for the bus, or for this board.
+pub fn write_knx(data: &[u8]) {
+    let [seq, hi, lo, rest @ ..] = data else {
+        return;
+    };
+    if rest.is_empty() || !crate::fw_knx::from_central(*seq, u16::from_be_bytes([*hi, *lo]), rest) {
+        let _ = RESULTS.try_send((*seq, Status::Busy));
     }
 }
 
@@ -93,16 +110,29 @@ pub fn write(data: &[u8]) {
 pub async fn serve<P: PacketPool>(svc: &KnixxService, conn: &GattConnection<'_, '_, P>) {
     let mut buf = [0u8; MAX_VALUE];
     loop {
-        let r = match select(RESULTS.receive(), GROUP.receive()).await {
+        let r = match select3(
+            RESULTS.receive(),
+            GROUP.receive(),
+            crate::fw_knx::ANSWERS.receive(),
+        )
+        .await
+        {
             _ if !nus::connected() => continue,
-            Either::First((seq, status)) => {
+            Either3::First((seq, status)) => {
                 svc.result
                     .notify_raw(conn, &gatt::encode_result(seq, status), false)
                     .await
             }
-            Either::Second(g) => {
+            Either3::Second(g) => {
                 let n = g.encode(&mut buf);
                 svc.group.notify_raw(conn, &buf[..n], false).await
+            }
+            Either3::Third((src, data)) => {
+                let mut n = [0u8; MAX_VALUE];
+                n[..2].copy_from_slice(&src.to_be_bytes());
+                let len = (2 + data.len()).min(MAX_VALUE);
+                n[2..len].copy_from_slice(&data[..len - 2]);
+                svc.knx.notify_raw(conn, &n[..len], false).await
             }
         };
         if r.is_err() {

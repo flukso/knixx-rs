@@ -21,6 +21,7 @@ mod bus;
 mod console;
 mod fw;
 mod fw_gatt;
+mod fw_knx;
 #[cfg(feature = "scripts")]
 mod heap;
 mod i2c;
@@ -124,6 +125,7 @@ async fn main(spawner: Spawner) {
         Irqs,
     );
     spawner.spawn(bus::task(uart).unwrap());
+    spawner.spawn(fw_knx::task().unwrap());
     #[cfg(feature = "scripts")]
     spawner.spawn(runner::task().unwrap());
 

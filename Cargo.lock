@@ -192,6 +192,7 @@ dependencies = [
  "knixx-console",
  "knixx-host",
  "knixx-image",
+ "knixx-knx",
  "knixx-script",
  "md-5",
  "serialport",

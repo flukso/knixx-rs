@@ -425,6 +425,46 @@ update of many boards from one laptop that is paired with none of them.
 
 `fw install` on the console, or `bolt fw install`, then installs it.
 
+### An installation: the KNX control plane
+
+A laptop that is paired with one board, the proxy, reaches all the others
+through the KNX bus:
+
+```
+bolt fleet scan                        # who is there: board, counter, state, BLE address
+bolt fleet status <board>              # what a board runs and has staged
+bolt fleet open <board> [file.kfw]     # opens its update window for that image
+bolt fleet install <board> [file.kfw]  # installs it, once staged
+bolt fleet close <board>               # shuts the window
+```
+
+- **The proxy:** bolt connects to the proxy's knixx service (`--via` or
+  `--via-addr` pick it; it must be paired) and writes the requests to its
+  `knx` characteristic. The proxy sends them on the bus, and notifies the
+  answers addressed to it. A request for the proxy itself it answers
+  without the bus, so it is a board like the others.
+- **The messages:** `A_UserManufacturerInfo_Read` (APCI 0x2C5) for the
+  requests and `A_UserManufacturerInfo_Response` (0x2C6) for the answers,
+  the two services KNX keeps for the manufacturer
+  (`crates/knixx-knx/src/fw.rs`). Each starts with the tag `0x6B`, so that
+  other makers' answers are ignored, and fits a standard frame.
+- **Addressing:**
+  - **A scan** goes to the broadcast 0/0/0, which every line coupler passes.
+    Each thunder answers 1-1 from its individual address
+    (`device.individual`, unique per board), after a delay of up to 2 s that
+    differs from board to board.
+  - **Everything else** goes 1-1 to a board's individual address, with a hop
+    count of 6.
+  - **Bus load:** a handful of telegrams per board for an update.
+- **Acks:** the board gives its transceiver its individual address
+  (U_SetAddress), so that the transceiver acks the telegrams addressed to it.
+- **Open** opens the window only for an image newer than the one that runs
+  (otherwise `Current` or a refusal), at most once every 2 s. **Install**
+  installs only the staged image of the counter given.
+
+Then push the image to each board in its window with `bolt fw push`. The
+bus side, between boards, waits for a test on a KNX line.
+
 ## Console
 
 The USB serial port carries the console: the banner on the first key, then

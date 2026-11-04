@@ -77,6 +77,16 @@ const T0: Instant = Instant::from_secs(1000);
 /// feeds the engine what d returns, and advances the time to the engine's
 /// deadlines. It stops when nothing is left to do, or when the next deadline
 /// is past `limit` after the start.
+/// An engine for dev, past its first request: the U_SetAddress.req of the
+/// device's individual address.
+pub(crate) fn engine_for(dev: Device, flags: &Flags) -> Engine<'_> {
+    let mut e = Engine::new(dev, flags);
+    let mut out = Capture::default();
+    let req = e.poll(T0, &mut out).map(<[u8]>::to_vec);
+    assert_eq!(req.as_deref(), Some(&knixx_ncn::set_address(dev.individual)[..]));
+    e
+}
+
 pub(crate) fn run_for(
     d: &mut FakeDevice,
     dev: &Device,
@@ -85,7 +95,7 @@ pub(crate) fn run_for(
     limit: Option<Duration>,
 ) -> Capture {
     let mut out = Capture::default();
-    let mut engine = Engine::new(*dev, flags);
+    let mut engine = engine_for(*dev, flags);
     let mut now = T0;
     let mut cmds = queued.iter();
     let mut cmd = cmds.next();
@@ -315,7 +325,7 @@ fn config() {
 fn transmit_failed() {
     let flags = Flags::new();
     let mut out = Capture::default();
-    let mut engine = Engine::new(test_device(), &flags);
+    let mut engine = engine_for(test_device(), &flags);
     engine.command(switch(1, true), T0, &mut out);
     assert!(engine.poll(T0, &mut out).is_some());
     engine.transmit_failed(&mut out);
@@ -585,7 +595,7 @@ fn telegrams_reach_the_output() {
     for sniff in [false, true] {
         let flags = Flags::new();
         flags.sniff.store(sniff, Ordering::Relaxed);
-        let mut engine = Engine::new(dev, &flags);
+        let mut engine = engine_for(dev, &flags);
         let mut out = Capture::default();
         let mut bad = ind(&foreign);
         *bad.last_mut().unwrap() ^= 0xff; // a wrong checksum
@@ -738,7 +748,7 @@ fn send_results() {
 
     // A negative L_Data.con.
     let mut out = Capture::default();
-    let mut engine = Engine::new(dev, &flags);
+    let mut engine = engine_for(dev, &flags);
     engine.command(
         Command::Send {
             tg: write,
@@ -765,4 +775,91 @@ fn send_results() {
     assert!(engine.poll(T0, &mut out).is_some());
     engine.transmit_failed(&mut out);
     assert_eq!(out.sent, [(Tag::Gatt(9), Status::Failed)]);
+}
+
+/// The transceiver learns the individual address at start and after it
+/// changed, before anything else goes out.
+#[test]
+fn set_address() {
+    let flags = Flags::new();
+    let mut out = Capture::default();
+    let dev = test_device();
+    let mut engine = engine_for(dev, &flags);
+    assert!(engine.poll(T0, &mut out).is_none());
+    // The same address: nothing.
+    engine.command(Command::Config(dev), T0, &mut out);
+    assert!(engine.poll(T0, &mut out).is_none());
+    let mut moved = dev;
+    moved.individual = 0x1104;
+    engine.command(Command::Config(moved), T0, &mut out);
+    assert_eq!(engine.poll(T0, &mut out), Some(&[0xf1, 0x11, 0x04, 0x00][..]));
+    assert!(engine.poll(T0, &mut out).is_none());
+}
+
+/// The control plane's telegrams go out individually addressed, or to the
+/// broadcast, with a hop count of 6; anything else with the Fw tag is
+/// refused.
+#[test]
+fn fw_sends() {
+    use knixx_knx::tp1::{AddrType, Apci};
+    let flags = Flags::new();
+    let dev = test_device();
+    let mut tg = dev.group_write(0x1105, &[0x05, 0x6b, 0x01]);
+    tg.apci = Apci::UserMessage;
+    tg.npci.addr_type = AddrType::Individual;
+    let mut out = Capture::default();
+    let mut engine = engine_for(dev, &flags);
+    engine.command(Command::Send { tg, tag: Tag::Fw(3) }, T0, &mut out);
+    let req = engine.poll(T0, &mut out).expect("a request").to_vec();
+    // The frame in the request: every other byte after U_L_DATA_START.
+    let frame: Vec<u8> = req.iter().skip(1).step_by(2).copied().collect();
+    let mut sent = Telegram::default();
+    sent.unpack(&frame).unwrap();
+    assert_eq!(sent.npci.addr_type, AddrType::Individual);
+    assert_eq!(sent.npci.routing, 6);
+    assert_eq!(sent.dest, 0x1105);
+    assert_eq!(sent.src, dev.individual);
+    assert_eq!(sent.apci, Apci::UserMessage);
+    assert_eq!(sent.data(), &[0x05, 0x6b, 0x01]);
+
+    // A group other than the broadcast, or another APCI: refused.
+    for bad in [
+        {
+            let mut t = tg;
+            t.npci.addr_type = AddrType::Group;
+            t
+        },
+        {
+            let mut t = tg;
+            t.apci = Apci::GroupValueWrite;
+            t
+        },
+    ] {
+        let mut out = Capture::default();
+        let mut engine = engine_for(dev, &flags);
+        engine.command(
+            Command::Send {
+                tg: bad,
+                tag: Tag::Fw(4),
+            },
+            T0,
+            &mut out,
+        );
+        assert_eq!(out.sent, [(Tag::Fw(4), Status::Refused)]);
+    }
+    // The broadcast is taken.
+    let mut b = tg;
+    b.npci.addr_type = AddrType::Group;
+    b.dest = 0;
+    let mut out = Capture::default();
+    let mut engine = engine_for(dev, &flags);
+    engine.command(
+        Command::Send {
+            tg: b,
+            tag: Tag::Fw(5),
+        },
+        T0,
+        &mut out,
+    );
+    assert!(engine.poll(T0, &mut out).is_some());
 }

@@ -1,14 +1,12 @@
-//! Resets into the Adafruit bootloader: GPREGRET tells it what to do after
-//! the reset. The SoftDevice is never enabled, so the register is written
-//! directly.
+//! Resets into the bootloader (firmware/knixx-boot): GPREGRET tells it what
+//! to do after the reset, GPREGRET2 tells what it did.
 
 use embassy_nrf::interrupt::{self, InterruptExt, Priority};
 use embassy_nrf::pac;
+use knixx_image::{self as image, HEADER_SIZE, Header};
 
-/// Starts the UF2 bootloader: its USB drive (the 1200-baud touch).
-pub const UF2: u8 = 0x57;
-/// Starts the bootloader's BLE DFU (the ota command).
-pub const OTA: u8 = 0xA8;
+/// Waits for an image over USB: the 1200-baud touch, `fw recovery`.
+pub const RECOVERY: u8 = image::GPREGRET_RECOVERY;
 
 /// Resets the chip into the bootloader in mode magic.
 pub fn reset_into(magic: u8) -> ! {
@@ -16,11 +14,25 @@ pub fn reset_into(magic: u8) -> ! {
     cortex_m::peripheral::SCB::sys_reset()
 }
 
-/// Clears what the bootloader leaves of POWER and CLOCK when it jumps to
+/// The header of the running firmware, which the bootloader checked.
+pub fn header() -> Option<Header> {
+    // Safety: internal flash below the application, memory-mapped.
+    let raw: &[u8; HEADER_SIZE] = unsafe { &*(image::HEADER_ADDR as *const [u8; HEADER_SIZE]) };
+    Header::parse(raw).ok()
+}
+
+/// What the bootloader did on the last boot (knixx_image::result), read
+/// once at boot.
+pub fn last_result() -> u8 {
+    pac::POWER.gpregret2().read().gpregret()
+}
+
+/// Clears what a bootloader may leave of POWER and CLOCK when it jumps to
 /// the application without a reset: the USB and clock events and their
 /// interrupt enables. Left set, they fire the clock interrupt before MPSL
 /// and the USB driver are ready for it, which hangs a board that runs both
-/// (nrf-sdc issue #103). Called first thing in main.
+/// (nrf-sdc issue #103). Called first thing in main. Our bootloader jumps
+/// before it touches them; this stays for one release.
 pub fn sanitize() {
     let power = pac::POWER;
     power.events_usbdetected().write_value(0);

@@ -1,6 +1,5 @@
 //! Bluetooth LE with Nordic's SoftDevice Controller (nrf-sdc), linked into
-//! the application, under the trouble host. The S140 SoftDevice that the
-//! bootloader keeps in flash is never enabled.
+//! the application, under the trouble host.
 //!
 //! The multiprotocol service layer (MPSL) owns the clocks, RTC0, TIMER0,
 //! TEMP, RADIO and PPI channels 17 to 31; it runs from boot, also when BLE

@@ -58,6 +58,7 @@ async fn main(spawner: Spawner) {
     stack::paint();
     panic::latch();
     boot::sanitize();
+    console::LAST_RESULT.store(boot::last_result(), core::sync::atomic::Ordering::Relaxed);
 
     // Interrupt priorities: MPSL keeps P0 (radio, its timers) and P1 to
     // itself and runs its clock and low-priority work at P4. The rest of the

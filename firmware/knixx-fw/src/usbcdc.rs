@@ -1,14 +1,14 @@
 //! The USB CDC serial port of the console. The board presents itself as
-//! knixx's own device, pid.codes 1209:A7EA, with the chip's device ID as
-//! its serial number, so that hosts can tell boards apart (Linux names it
-//! in /dev/serial/by-id). The firmware before 0.5 used the Feather's
-//! 239A:802A, which the host tools still accept.
+//! knixx's own device, pid.codes 1209:A7EA, product "knixx thunder", with
+//! the chip's device ID as its serial number, so that hosts can tell boards
+//! apart (Linux names it in /dev/serial/by-id). The bootloader has the same
+//! ID and serial number, as "knixx bootloader".
 //!
 //! Output goes to OUT, a queue that writers fill without waiting: a write
 //! that does not fit is dropped whole, and the sender notes the loss once it
 //! catches up, so a host that does not read never stalls the console.
 //! tx_task drains it to the host while a terminal holds DTR, and resets the
-//! board into its UF2 bootloader on the 1200-baud touch.
+//! board into the bootloader's USB recovery on the 1200-baud touch.
 
 use core::cell::RefCell;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -154,8 +154,8 @@ fn drain() {
 }
 
 /// Drains OUT to the host while a terminal holds DTR, and resets into the
-/// UF2 bootloader when the host sets 1200 baud and drops DTR, as the
-/// Arduino tools and the TinyGo firmware do.
+/// bootloader's USB recovery when the host sets 1200 baud and drops DTR, as
+/// the Arduino tools do.
 #[embassy_executor::task]
 pub async fn tx_task(port: (Sender<'static, UsbDriver>, ControlChanged<'static>)) -> ! {
     let (mut tx, control) = port;
@@ -170,7 +170,7 @@ pub async fn tx_task(port: (Sender<'static, UsbDriver>, ControlChanged<'static>)
                 }
                 DTR.store(dtr, Ordering::Relaxed);
                 if tx.line_coding().data_rate() == 1200 && !dtr {
-                    boot::reset_into(boot::UF2);
+                    boot::reset_into(boot::RECOVERY);
                 }
             }
             if !DTR.load(Ordering::Relaxed) {

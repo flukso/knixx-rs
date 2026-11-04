@@ -1,5 +1,5 @@
 //! A panic records its message in RAM that neither the startup code nor
-//! the UF2 bootloader touches (PANIC in memory.x), and resets the chip; the
+//! the bootloader touches (PANIC in memory.x), and resets the chip; the
 //! next boot shows the record in its banner.
 //!
 //! The record also names the script that was running, if one was: the next

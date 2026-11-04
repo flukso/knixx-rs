@@ -31,7 +31,7 @@ use crate::{bonds, boot, leds, link, nus, panic, script, storage, usbcdc};
 
 const PROMPT: &str = ">>> ";
 
-/// The version line, also checked by bolt uf2 --expect after a flash.
+/// The version line, also checked by bolt flash after a flash.
 pub const VERSION: &str = concat!(
     "version ",
     env!("KNIXX_COMMIT"),
@@ -243,9 +243,9 @@ const fn commands() -> [Cmd<Ctx>; knixx_cli::NUM_SHARED + 8] {
             run: sys,
         },
         Cmd {
-            name: "ota",
-            help: "reboot into the bootloader for a BLE firmware update (DFU)",
-            run: ota,
+            name: "fw",
+            help: "the firmware: status, or recovery to reboot into the bootloader's USB recovery",
+            run: fw,
         },
     ]
 }
@@ -417,10 +417,54 @@ fn ble_cmd(_: &mut Ctx, args: &[&str], w: &mut dyn Write) -> Action {
     Action::None
 }
 
-fn ota(_: &mut Ctx, _: &[&str], w: &mut dyn Write) -> Action {
-    let _ = writeln!(w, "rebooting into the bootloader for a BLE firmware update");
-    Action::Reboot(boot::OTA)
+fn fw(_: &mut Ctx, args: &[&str], w: &mut dyn Write) -> Action {
+    match args {
+        [] | ["status"] => {
+            fw_status(w);
+            Action::None
+        }
+        ["recovery"] => {
+            let _ = writeln!(w, "fw: rebooting into the bootloader's USB recovery");
+            Action::Reboot(boot::RECOVERY)
+        }
+        _ => {
+            let _ = writeln!(w, "usage: fw [status | recovery]");
+            Action::None
+        }
+    }
 }
+
+/// The running firmware's header, and what the bootloader did last.
+fn fw_status(w: &mut dyn Write) {
+    match boot::header() {
+        Some(h) => {
+            let _ = writeln!(
+                w,
+                "fw: running {} (counter {}, {} bytes, key {})",
+                h.version_str(),
+                h.counter,
+                h.len,
+                h.key
+            );
+        }
+        None => {
+            let _ = writeln!(w, "fw: running without an image header (flashed by the probe?)");
+        }
+    }
+    let last = LAST_RESULT.load(core::sync::atomic::Ordering::Relaxed);
+    let what = match last {
+        knixx_image::result::NONE => return,
+        knixx_image::result::INSTALLED => "installed",
+        knixx_image::result::WRITE => "failed writing internal flash",
+        knixx_image::result::READ => "could not read the staged image",
+        r if r & 0xF0 == knixx_image::result::REFUSED => "refused the staged image",
+        _ => "unknown",
+    };
+    let _ = writeln!(w, "fw: the bootloader {what} on the last boot ({last:#04x})");
+}
+
+/// What the bootloader did on this boot, from GPREGRET2.
+pub static LAST_RESULT: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
 
 /// The console task's state.
 struct Console {

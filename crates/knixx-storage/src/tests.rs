@@ -211,3 +211,51 @@ fn file_errors() {
     assert!(matches!(mkdir(&mut blank, "/scripts"), Err(FsError::Mount(_))));
     assert!(!has_superblock(&mut blank));
 }
+
+#[test]
+fn streamed_file() {
+    let mut f = formatted();
+    mkdir(&mut f, "/fw").unwrap();
+    create(&mut f, "/fw/update.tmp").unwrap();
+    // A firmware-sized file in 4 KiB pieces, as the fw service stages one.
+    let data: Vec<u8> = (0..300_000u32).map(|i| (i ^ (i >> 8)) as u8).collect();
+    let mut size = 0;
+    for piece in data.chunks(4096) {
+        size = append(&mut f, "/fw/update.tmp", piece).unwrap();
+    }
+    assert_eq!(size as usize, data.len());
+    // Read back at offsets, across pieces, and past the end.
+    let mut buf = [0u8; 5000];
+    for off in [0usize, 1, 4095, 100_000, 299_000] {
+        let n = read_at(&mut f, "/fw/update.tmp", off as u32, &mut buf).unwrap();
+        let want = &data[off..(off + buf.len()).min(data.len())];
+        assert_eq!(&buf[..n], want, "at {off}");
+    }
+    assert_eq!(
+        read_at(&mut f, "/fw/update.tmp", data.len() as u32, &mut buf).unwrap(),
+        0
+    );
+    rename(&mut f, "/fw/update.tmp", "/fw/update.kfw").unwrap();
+    let got = stat(&mut f, "/fw/update.kfw", |e| e.map(|e| e.size)).unwrap();
+    assert_eq!(got, Some(data.len() as u32));
+    assert!(stat(&mut f, "/fw/update.tmp", |e| e.is_none()).unwrap());
+    // create truncates.
+    create(&mut f, "/fw/update.kfw").unwrap();
+    assert_eq!(
+        stat(&mut f, "/fw/update.kfw", |e| e.map(|e| e.size)).unwrap(),
+        Some(0)
+    );
+}
+
+#[test]
+fn append_needs_the_file_and_space_shrinks() {
+    let mut f = formatted();
+    assert!(append(&mut f, "/missing", b"x").unwrap_err().not_found());
+    let before = free(&mut f).unwrap();
+    create(&mut f, "/big").unwrap();
+    append(&mut f, "/big", &[0x55; 100_000]).unwrap();
+    let after = free(&mut f).unwrap();
+    assert!(before - after >= 100_000, "{before} -> {after}");
+    remove(&mut f, "/big").unwrap();
+    assert_eq!(free(&mut f).unwrap(), before);
+}

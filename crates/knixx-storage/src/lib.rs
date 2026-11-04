@@ -552,6 +552,85 @@ pub fn mkdir<D: BlockDevice>(dev: &mut D, path: &str) -> Result<(), FsError> {
     })
 }
 
+/// Creates the file at path empty, replacing it if it is there, for a file
+/// that [`append`] then fills piece by piece.
+pub fn create<D: BlockDevice>(dev: &mut D, path: &str) -> Result<(), FsError> {
+    let p = CPath::new(path)?;
+    Lfs::with_mounted(dev, |fs| fs.write_file(p.c(), &[]).map_err(FsError::Fs))
+}
+
+/// Appends data to the file at path, which must exist, and returns its new
+/// size. Each call closes the file, so what it wrote stays after a reset:
+/// a file filled over minutes, such as a staged firmware, resumes from its
+/// size.
+pub fn append<D: BlockDevice>(dev: &mut D, path: &str, data: &[u8]) -> Result<u32, FsError> {
+    let p = CPath::new(path)?;
+    let flags = (ll::lfs_open_flags_LFS_O_WRONLY | ll::lfs_open_flags_LFS_O_APPEND) as c_int;
+    Lfs::with_mounted(dev, |fs| {
+        fs.with_file(p.c(), flags, |lfs, file| {
+            // Safety: data is a live buffer of its length.
+            let n = check(unsafe {
+                ll::lfs_file_write(lfs, file, data.as_ptr() as *const c_void, data.len() as u32)
+            })?;
+            if n as usize != data.len() {
+                return Err(Code(ll::lfs_error_LFS_ERR_NOSPC));
+            }
+            // Safety: the file is open.
+            check(unsafe { ll::lfs_file_size(lfs, file) }).map(|s| s as u32)
+        })
+        .map_err(FsError::Fs)
+    })
+}
+
+/// Reads from the file at path, from offset off, into buf, and returns the
+/// bytes read: fewer than buf.len() only at the end of the file.
+pub fn read_at<D: BlockDevice>(dev: &mut D, path: &str, off: u32, buf: &mut [u8]) -> Result<usize, FsError> {
+    let p = CPath::new(path)?;
+    Lfs::with_mounted(dev, |fs| {
+        fs.with_file(p.c(), ll::lfs_open_flags_LFS_O_RDONLY as c_int, |lfs, file| {
+            // Safety: the file is open.
+            check(unsafe {
+                ll::lfs_file_seek(lfs, file, off as i32, ll::lfs_whence_flags_LFS_SEEK_SET as c_int)
+            })?;
+            let mut n = 0;
+            while n < buf.len() {
+                let rest = &mut buf[n..];
+                // Safety: rest is a live buffer of its length.
+                let m = check(unsafe {
+                    ll::lfs_file_read(lfs, file, rest.as_mut_ptr() as *mut c_void, rest.len() as u32)
+                })?;
+                if m == 0 {
+                    break;
+                }
+                n += m as usize;
+            }
+            Ok(n)
+        })
+        .map_err(FsError::Fs)
+    })
+}
+
+/// Renames the file at from to to, replacing to if it is there.
+pub fn rename<D: BlockDevice>(dev: &mut D, from: &str, to: &str) -> Result<(), FsError> {
+    let f = CPath::new(from)?;
+    let t = CPath::new(to)?;
+    Lfs::with_mounted(dev, |fs| {
+        // Safety: mounted; both paths are C strings.
+        check(unsafe { ll::lfs_rename(&mut fs.lfs, f.c().as_ptr() as _, t.c().as_ptr() as _) })
+            .map(|_| ())
+            .map_err(FsError::Fs)
+    })
+}
+
+/// The free space of the littlefs, in bytes: the blocks not in use.
+pub fn free<D: BlockDevice>(dev: &mut D) -> Result<u32, FsError> {
+    Lfs::with_mounted(dev, |fs| {
+        // Safety: mounted.
+        let used = check(unsafe { ll::lfs_fs_size(&mut fs.lfs) }).map_err(FsError::Fs)? as u32;
+        Ok((SECTOR_COUNT as u32).saturating_sub(used) * SECTOR_SIZE as u32)
+    })
+}
+
 /// Runs f on the entry of path, or None when there is none.
 pub fn stat<D: BlockDevice, R>(
     dev: &mut D,

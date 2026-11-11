@@ -1,0 +1,11 @@
+[package]
+name = "knixx-xfer"
+version = "0.1.0"
+description = "The one transfer protocol of knixx thunder: firmware, scripts and the config, pushed and pulled, over BLE and USB"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+knixx-image = { path = "../knixx-image" }
+knixx-console = { path = "../knixx-console" }
+knixx-device = { path = "../knixx-device" }

@@ -13,6 +13,7 @@
 mod ble;
 mod client;
 mod fleet;
+mod fleet_files;
 mod fw;
 mod input;
 mod script;
@@ -230,6 +231,32 @@ enum FleetCmd {
         #[arg(long, default_value_t = 15)]
         minutes: u8,
     },
+    /// Push each board's folder of dir (<dir>/<individual address>/
+    /// knixx.ini and scripts/*.rhai|.rhgn) to it: what a board has already
+    /// is skipped.
+    Push {
+        dir: PathBuf,
+        /// Boards pushed to at a time.
+        #[arg(long, default_value_t = 4)]
+        parallel: usize,
+        /// How long each board's window stays open, in minutes.
+        #[arg(long, default_value_t = 10)]
+        minutes: u8,
+        /// Push a proxy's config that changes its ble.knixx or ble.pair.
+        #[arg(long)]
+        force_proxy: bool,
+    },
+    /// Pull each board's knixx.ini and scripts into <dir>/<individual
+    /// address>/, overwriting.
+    Pull {
+        dir: PathBuf,
+        /// Boards pulled from at a time.
+        #[arg(long, default_value_t = 4)]
+        parallel: usize,
+        /// How long each board's window stays open, in minutes.
+        #[arg(long, default_value_t = 10)]
+        minutes: u8,
+    },
 }
 
 #[derive(Subcommand)]
@@ -408,6 +435,36 @@ fn main() -> Result<()> {
                     parallel,
                     Duration::from_secs(stagger),
                     minutes,
+                ),
+                FleetCmd::Push {
+                    dir,
+                    parallel,
+                    minutes,
+                    force_proxy,
+                } => fleet_files::push(
+                    &dir,
+                    &fleet_files::Fleet {
+                        via: &via,
+                        via_addr: &via_addr,
+                        wait,
+                        parallel,
+                        minutes,
+                    },
+                    force_proxy,
+                ),
+                FleetCmd::Pull {
+                    dir,
+                    parallel,
+                    minutes,
+                } => fleet_files::pull(
+                    &dir,
+                    &fleet_files::Fleet {
+                        via: &via,
+                        via_addr: &via_addr,
+                        wait,
+                        parallel,
+                        minutes,
+                    },
                 ),
                 FleetCmd::Close { board } => {
                     fleet::request(&board, knixx_knx::fw::Request::Close, &via, &via_addr, wait)

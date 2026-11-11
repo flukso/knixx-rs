@@ -689,8 +689,13 @@ fn admit(conn: &Conn) -> bool {
         }
         return true;
     }
-    if conn.raw().security_level().is_ok_and(|l| l.encrypted()) || nus::connected() {
-        nus::CONNECTED.store(false, Ordering::Relaxed);
+    // No longer the console's: its writes are refused from now on.
+    let was = nus::CONNECTED.swap(false, Ordering::Relaxed);
+    // A link encrypted without a bond goes. So does one let in while
+    // ble.pair was off, unless an update window is open: there it keeps
+    // the transfer service, which needs no pairing, and so gets the done
+    // of the very config that turned ble.pair on.
+    if conn.raw().security_level().is_ok_and(|l| l.encrypted()) || (was && !xfer_gatt::window_open()) {
         conn.raw().disconnect();
         return false;
     }

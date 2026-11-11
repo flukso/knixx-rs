@@ -67,8 +67,11 @@ pub enum Request {
     Open { counter: u32, crc: u32, minutes: u8 },
     /// Install the staged image of counter.
     Install { counter: u32 },
-    /// Shut the update window.
+    /// Shut the update window, and drop a transfer in progress.
     Close,
+    /// Open the update window for minutes, for scripts and the config:
+    /// no image to check.
+    Window { minutes: u8 },
 }
 
 /// An answer, from a board.
@@ -89,7 +92,7 @@ pub enum Response {
         error: u8,
         progress: u8,
     },
-    /// To open: the window is open; connect to the BLE address.
+    /// To open or window: the window is open; connect to the BLE address.
     Ready { ble: [u8; 6] },
     /// To open: this image runs already.
     Current,
@@ -109,7 +112,7 @@ pub mod reason {
     pub const NOT_STAGED: u8 = 2;
     /// Asked too often.
     pub const RATE: u8 = 3;
-    /// An image comes in over the console.
+    /// A transfer is in progress.
     pub const BUSY: u8 = 4;
 }
 
@@ -118,6 +121,7 @@ const OP_STATUS: u8 = 0x02;
 const OP_OPEN: u8 = 0x03;
 const OP_INSTALL: u8 = 0x04;
 const OP_CLOSE: u8 = 0x05;
+const OP_WINDOW: u8 = 0x06;
 
 const OP_INFO: u8 = 0x81;
 const OP_STATUS_R: u8 = 0x82;
@@ -205,6 +209,10 @@ impl Request {
                 d.put(&counter.to_le_bytes());
             }
             Request::Close => d = Data::new(READ_LOW, OP_CLOSE),
+            Request::Window { minutes } => {
+                d = Data::new(READ_LOW, OP_WINDOW);
+                d.put(&[minutes]);
+            }
         }
         d
     }
@@ -224,6 +232,7 @@ impl Request {
                 counter: u32_at(b, 0)?,
             },
             OP_CLOSE => Request::Close,
+            OP_WINDOW => Request::Window { minutes: *b.first()? },
             _ => return None,
         })
     }
@@ -304,7 +313,7 @@ pub struct Board {
     pub error: u8,
     /// How much of an incoming image is in, in percent.
     pub progress: u8,
-    /// An image comes in over the console.
+    /// A transfer is in progress.
     pub busy: bool,
 }
 
@@ -370,6 +379,13 @@ pub fn answer(req: &Request, b: &Board) -> (Response, Act) {
             }
         }
         Request::Close => (Response::Closed, Act::Close),
+        Request::Window { minutes } => {
+            if b.busy {
+                (Response::Refused { reason: reason::BUSY }, Act::None)
+            } else {
+                (Response::Ready { ble: b.ble }, Act::Open(minutes.clamp(1, 60)))
+            }
+        }
     }
 }
 
@@ -421,6 +437,7 @@ mod tests {
             },
             Request::Install { counter: 7 },
             Request::Close,
+            Request::Window { minutes: 15 },
         ] {
             let d = r.encode();
             assert!(d.as_slice().len() <= MAX_PAYLOAD);
@@ -522,6 +539,15 @@ mod tests {
         );
         assert_eq!(answer(&Request::Install { counter: 102 }, &staged).1, Act::None);
         assert_eq!(answer(&Request::Close, &b), (Response::Closed, Act::Close));
+        // A window for scripts and the config: no image to check.
+        assert_eq!(
+            answer(&Request::Window { minutes: 0 }, &b),
+            (Response::Ready { ble: [9; 6] }, Act::Open(1))
+        );
+        assert_eq!(
+            answer(&Request::Window { minutes: 5 }, &busy).0,
+            Response::Refused { reason: reason::BUSY }
+        );
         assert!(matches!(
             answer(&Request::Status, &staged).0,
             Response::Status { staged: 101, .. }

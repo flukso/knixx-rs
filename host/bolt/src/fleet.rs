@@ -21,11 +21,11 @@ const KNIXX_RESULT: &str = "6b6e7803-1b5d-4c8e-a2f0-3e5b9d8c7a10";
 const KNIXX_KNX: &str = "6b6e7806-1b5d-4c8e-a2f0-3e5b9d8c7a10";
 
 /// How long a scan collects answers: the boards spread theirs over 2 s.
-const SCAN_WAIT: Duration = Duration::from_secs(4);
+pub const SCAN_WAIT: Duration = Duration::from_secs(4);
 
 /// The proxy: the knx characteristic and its notifications.
 pub struct Proxy {
-    p: Peripheral,
+    pub p: Peripheral,
     knx: Characteristic,
     notes: mpsc::UnboundedReceiver<(String, Vec<u8>)>,
     seq: u8,
@@ -135,7 +135,7 @@ fn ble_hex(b: &[u8; 6]) -> String {
         .join(":")
 }
 
-fn runtime() -> Result<tokio::runtime::Runtime> {
+pub fn runtime() -> Result<tokio::runtime::Runtime> {
     Ok(tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?)
@@ -249,7 +249,7 @@ struct Seen {
     ble: [u8; 6],
 }
 
-fn name(a: u16) -> String {
+pub fn name(a: u16) -> String {
     IndividualAddress(a).to_string()
 }
 

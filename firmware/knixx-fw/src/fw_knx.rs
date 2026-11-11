@@ -133,7 +133,7 @@ pub async fn task() -> ! {
     loop {
         let (from, req) = REQUESTS.receive().await;
         let (mut resp, mut act) = fw::answer(&req, &board());
-        if let Request::Open { .. } = req {
+        if let Request::Open { .. } | Request::Window { .. } = req {
             let now = Instant::now().as_millis() as u32;
             let last = LAST_OPEN.load(Ordering::Relaxed);
             if last != u32::MAX && now.wrapping_sub(last) < OPEN_GAP.as_millis() as u32 {

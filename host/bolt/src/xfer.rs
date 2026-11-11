@@ -197,7 +197,8 @@ pub fn script(path: &Path, name: Option<&str>, always: bool, o: &Opts) -> Result
     }
     let source = crate::script::source_hash(path)?;
     with_link(o, async |l| {
-        if !always && l.has_script(&name, source.as_deref(), &data).await? {
+        let list = l.list().await?;
+        if !always && l.has_script(&list, &name, source.as_deref(), &data).await? {
             eprintln!("{name}: the board has it already; --always to push it anyway");
             return Ok(());
         }
@@ -246,8 +247,9 @@ fn board_dir(dir: &Path, config: &[u8]) -> Result<PathBuf> {
     Ok(dir.join(IndividualAddress(dev.individual).to_string()))
 }
 
-/// Writes data to path, making its folder; says whether it changed.
-fn write_file(path: &Path, data: &[u8]) -> Result<()> {
+/// Writes data to path, making its folder; says, and returns, whether it
+/// is new, changed or unchanged.
+pub fn write_file(path: &Path, data: &[u8]) -> Result<&'static str> {
     if let Some(d) = path.parent() {
         fs::create_dir_all(d).with_context(|| d.display().to_string())?;
     }
@@ -258,14 +260,14 @@ fn write_file(path: &Path, data: &[u8]) -> Result<()> {
     };
     fs::write(path, data).with_context(|| path.display().to_string())?;
     eprintln!("{}: {} bytes, {what}", path.display(), data.len());
-    Ok(())
+    Ok(what)
 }
 
 /// Pulls the board's knixx.ini into `<dir>/<board>/knixx.ini`.
 pub fn config_pull(dir: &Path, o: &Opts) -> Result<()> {
     with_link(o, async |l| {
         let ini = l.get(Kind::Config, "").await?;
-        write_file(&board_dir(dir, &ini)?.join("knixx.ini"), &ini)
+        write_file(&board_dir(dir, &ini)?.join("knixx.ini"), &ini).map(|_| ())
     })
 }
 
@@ -276,7 +278,7 @@ pub fn script_pull(name: Option<&str>, dir: &Path, o: &Opts) -> Result<()> {
     with_link(o, async |l| {
         let ini = l.get(Kind::Config, "").await?;
         let dir = board_dir(dir, &ini)?.join("scripts");
-        let list = parse_list(&l.get(Kind::ScriptList, "").await?);
+        let list = l.list().await?;
         let names: Vec<&String> = match name {
             Some(n) => vec![
                 list.get_key_value(n)
@@ -563,10 +565,21 @@ impl<'p> Link<'p> {
         }
     }
 
-    /// Whether the board has the script name already: its source, by the
-    /// hash its list gives, or the very bytes of data.
-    async fn has_script(&mut self, name: &str, source: Option<&str>, data: &[u8]) -> Result<bool> {
-        let list = parse_list(&self.get(Kind::ScriptList, "").await?);
+    /// The board's scripts.
+    pub async fn list(&mut self) -> Result<BTreeMap<String, Listed>> {
+        Ok(parse_list(&self.get(Kind::ScriptList, "").await?))
+    }
+
+    /// Whether the board, whose scripts are list, has the script name
+    /// already: its source, by the hash the list gives, or the very bytes
+    /// of data.
+    pub async fn has_script(
+        &mut self,
+        list: &BTreeMap<String, Listed>,
+        name: &str,
+        source: Option<&str>,
+        data: &[u8],
+    ) -> Result<bool> {
         let Some(on) = list.get(name) else {
             return Ok(false);
         };

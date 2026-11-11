@@ -23,15 +23,18 @@ use embassy_sync::channel::Channel;
 use embassy_sync::once_lock::OnceLock;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer, with_timeout};
+use knixx_cli::LoadError;
+use knixx_console::name::Name;
+use knixx_device::config;
 use knixx_image::stage::{Files, StageError, Stager};
-use knixx_image::{self as image, Refusal};
+use knixx_image::{self as image, Crc32, Refusal};
 use knixx_xfer::code;
-use knixx_xfer::msg::{Kind, MAX_CONTROL, Msg};
+use knixx_xfer::msg::{FORCE, Kind, MAX_CONTROL, Msg};
 use knixx_xfer::receiver::{Fail, Offer, Out, Receiver, Sink};
 use trouble_host::prelude::*;
 
-use crate::storage::{FileError, Fs};
-use crate::{boot, fw};
+use crate::storage::{self, FileError, Fs};
+use crate::{boot, fw, script};
 
 /// The service UUID, 6b6e7810-1b5d-4c8e-a2f0-3e5b9d8c7a10.
 #[gatt_service(uuid = "6b6e7810-1b5d-4c8e-a2f0-3e5b9d8c7a10")]
@@ -51,7 +54,7 @@ pub struct XferService {
 pub const CTRL: usize = 48;
 
 /// The kinds the board takes.
-const KINDS: &[Kind] = &[Kind::Firmware];
+const KINDS: &[Kind] = &[Kind::Firmware, Kind::Script, Kind::Config];
 
 /// After this long without data, a new put replaces a transfer.
 const IDLE_MS: u64 = 10_000;
@@ -81,7 +84,7 @@ fn xfer() -> &'static Mutex<ThreadModeRawMutex, RefCell<Xfer>> {
         Mutex::new(RefCell::new(Xfer {
             rx: Receiver::new(KINDS, IDLE_MS),
             sink: AppSink {
-                stager: None,
+                into: Into::Nothing,
                 last_error: 0,
             },
         }))
@@ -90,9 +93,75 @@ fn xfer() -> &'static Mutex<ThreadModeRawMutex, RefCell<Xfer>> {
 
 /// Where the board's received files go.
 struct AppSink {
-    stager: Option<Stager>,
+    into: Into,
     /// The code of the last failed file, 0 for none.
     last_error: u8,
+}
+
+/// The file being received.
+#[allow(clippy::large_enum_variant, reason = "one, in a static")]
+enum Into {
+    Nothing,
+    /// A firmware image, into the stager.
+    Firmware(Stager),
+    /// A script, appended to its .tmp file, which replaces the script once
+    /// it reads back right.
+    Script {
+        name: Name,
+        crc: Crc32,
+    },
+    /// The config, in RAM: it is checked and applied whole.
+    Config {
+        buf: heapless::Vec<u8, { config::MAX_FILE }>,
+        force: bool,
+    },
+}
+
+const STORAGE: Fail = Fail::new(code::STORAGE, "flash error");
+const STATE: Fail = Fail::new(code::STATE, "out of step");
+
+/// The file a script is received into.
+fn script_tmp(name: &str) -> heapless::String<64> {
+    let mut p = heapless::String::new();
+    let _ = core::fmt::Write::write_fmt(&mut p, format_args!("{}/{name}.tmp", script::DIR));
+    p
+}
+
+/// Checks the received script against what came, puts it in place and has
+/// the script task load it.
+fn finish_script(name: Name, crc: u32) -> Result<u32, Fail> {
+    let tmp = script_tmp(name.as_str());
+    let mut back = Crc32::new();
+    let mut buf = [0u8; 256];
+    let mut off = 0u32;
+    loop {
+        let n = Fs.read_at(&tmp, off, &mut buf).map_err(|_| STORAGE)?;
+        if n == 0 {
+            break;
+        }
+        back.update(&buf[..n]);
+        off += n as u32;
+    }
+    if back.finish() != crc {
+        return Err(Fail::new(code::CRC, "read-back mismatch"));
+    }
+    Fs.rename(&tmp, &script::path(name.as_str()))
+        .map_err(|_| STORAGE)?;
+    #[cfg(feature = "scripts")]
+    let _ = crate::runner::CONTROL.try_send(crate::runner::Control::Load(name));
+    Ok(off)
+}
+
+/// Checks, applies and saves a received config, as config_load does.
+fn finish_config(data: &[u8], force: bool) -> Result<u32, Fail> {
+    match knixx_cli::config_load(&mut crate::console::Ctx, data, force) {
+        Ok(_) => Ok(data.len() as u32),
+        Err(LoadError::Parse) => Err(Fail::new(code::CONFIG, "does not parse")),
+        Err(LoadError::Guard) => Err(Fail::new(code::GUARD, "another individual address")),
+        Err(LoadError::Check(why)) => Err(Fail::new(code::CONFIG, why)),
+        Err(LoadError::QueueFull) => Err(Fail::new(code::BUSY, "bus queue full")),
+        Err(LoadError::Save(_)) => Err(Fail::new(code::STORAGE, "applied, not saved")),
+    }
 }
 
 fn refusal(r: Refusal) -> Fail {
@@ -113,50 +182,85 @@ fn stage_fail(e: StageError<FileError>) -> Fail {
         StageError::Refused(r) => refusal(r),
         StageError::Space { .. } => Fail::new(code::SPACE, "no room on the flash"),
         StageError::TransportCrc | StageError::ReadBack => Fail::new(code::CRC, "read-back mismatch"),
-        StageError::Files(_) => Fail::new(code::STORAGE, "flash error"),
-        StageError::Overflow | StageError::SizeMismatch { .. } | StageError::Incomplete { .. } => {
-            Fail::new(code::STATE, "out of step")
-        }
+        StageError::Files(_) => STORAGE,
+        StageError::Overflow | StageError::SizeMismatch { .. } | StageError::Incomplete { .. } => STATE,
     }
 }
 
 impl Sink for AppSink {
-    fn open(&mut self, kind: Kind, _: &str, size: u32, _: u8) -> Result<(), Fail> {
-        self.stager = None;
-        match kind {
-            Kind::Firmware => {
-                self.stager = Some(Stager::begin(&mut Fs, size).map_err(stage_fail)?);
-                Ok(())
+    fn open(&mut self, kind: Kind, name: &str, size: u32, flags: u8) -> Result<(), Fail> {
+        self.abort();
+        self.into = match kind {
+            Kind::Firmware => Into::Firmware(Stager::begin(&mut Fs, size).map_err(stage_fail)?),
+            Kind::Script => {
+                let name = Name::new(name).ok_or(Fail::new(code::NAME, "bad name"))?;
+                storage::make_dir(script::DIR).map_err(|_| STORAGE)?;
+                let tmp = script_tmp(name.as_str());
+                let free = Fs.free().map_err(|_| STORAGE)?;
+                if free < size + 4096 {
+                    return Err(Fail::new(code::SPACE, "no room on the flash"));
+                }
+                Fs.create(&tmp).map_err(|_| STORAGE)?;
+                Into::Script {
+                    name,
+                    crc: Crc32::new(),
+                }
             }
-            _ => Err(Fail::new(code::KIND, "not taken here")),
-        }
+            Kind::Config => Into::Config {
+                buf: heapless::Vec::new(),
+                force: flags & FORCE != 0,
+            },
+            Kind::ScriptList => return Err(Fail::new(code::KIND, "not taken here")),
+        };
+        Ok(())
     }
 
     fn write(&mut self, data: &[u8]) -> Result<(), Fail> {
-        let Some(s) = self.stager.as_mut() else {
-            return Err(Fail::new(code::STATE, "out of step"));
-        };
-        let running = boot::header();
-        s.feed(&mut Fs, data, fw::keys(), running.as_ref())
-            .map_err(stage_fail)
+        match &mut self.into {
+            Into::Nothing => Err(STATE),
+            Into::Firmware(s) => {
+                let running = boot::header();
+                s.feed(&mut Fs, data, fw::keys(), running.as_ref())
+                    .map_err(stage_fail)
+            }
+            Into::Script { name, crc } => {
+                crc.update(data);
+                Fs.append(&script_tmp(name.as_str()), data)
+                    .map(|_| ())
+                    .map_err(|_| STORAGE)
+            }
+            Into::Config { buf, .. } => buf
+                .extend_from_slice(data)
+                .map_err(|_| Fail::new(code::SIZE, "too large")),
+        }
     }
 
     fn finish(&mut self) -> Result<u32, Fail> {
-        let Some(s) = self.stager.take() else {
-            return Err(Fail::new(code::STATE, "out of step"));
-        };
-        match s.finish(&mut Fs, None) {
-            Ok(h) => Ok(h.counter),
-            Err(e) => {
-                let _ = Fs.remove(image::STAGED_TMP);
-                Err(stage_fail(e))
-            }
+        match core::mem::replace(&mut self.into, Into::Nothing) {
+            Into::Nothing => Err(STATE),
+            Into::Firmware(s) => match s.finish(&mut Fs, None) {
+                Ok(h) => Ok(h.counter),
+                Err(e) => {
+                    let _ = Fs.remove(image::STAGED_TMP);
+                    Err(stage_fail(e))
+                }
+            },
+            Into::Script { name, crc } => finish_script(name, crc.finish()).inspect_err(|_| {
+                let _ = Fs.remove(&script_tmp(name.as_str()));
+            }),
+            Into::Config { buf, force } => finish_config(&buf, force),
         }
     }
 
     fn abort(&mut self) {
-        if self.stager.take().is_some() {
-            let _ = Fs.remove(image::STAGED_TMP);
+        match core::mem::replace(&mut self.into, Into::Nothing) {
+            Into::Firmware(_) => {
+                let _ = Fs.remove(image::STAGED_TMP);
+            }
+            Into::Script { name, .. } => {
+                let _ = Fs.remove(&script_tmp(name.as_str()));
+            }
+            Into::Nothing | Into::Config { .. } => {}
         }
     }
 }

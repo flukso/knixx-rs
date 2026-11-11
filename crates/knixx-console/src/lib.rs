@@ -7,4 +7,4 @@ extern crate std;
 pub mod lineedit;
 pub mod nus;
 pub mod outq;
-pub mod upload;
+pub mod name;

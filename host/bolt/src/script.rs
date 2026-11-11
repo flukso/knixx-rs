@@ -1,5 +1,5 @@
-//! bolt script: makes, builds and uploads the scripts of the board, and
-//! lists and removes the ones on it.
+//! bolt script: makes and builds the scripts of the board, and lists and
+//! removes the ones on it; bolt script push sends one (push.rs).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -7,7 +7,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use knixx_console::upload::{CHUNK, crc32, valid_name};
+use knixx_console::name::valid_name;
 use knixx_host::time::utc_now;
 use knixx_script::{Meta, compile, lines};
 use md5::{Digest, Md5};
@@ -134,7 +134,7 @@ fn resolve(path: &Path) -> PathBuf {
 /// The bytecode of path, built when it is a source, and the name of the
 /// script, from the file's name unless given. Without an extension, path is
 /// path.rhai, or else path.rhgn.
-fn bytecode(path: &Path, name: Option<&str>) -> Result<(String, Vec<u8>)> {
+pub fn bytecode(path: &Path, name: Option<&str>) -> Result<(String, Vec<u8>)> {
     let path = &resolve(path);
     let name = match name {
         Some(n) => n.to_string(),
@@ -165,47 +165,6 @@ pub fn with_client<R>(t: &Target, f: impl AsyncFnOnce(&mut Client) -> Result<R>)
         let r = f(&mut c).await;
         c.close().await;
         r
-    })
-}
-
-/// Reads lines until one of the upload's: the expected one, or an error.
-/// Other lines, such as a sensor's error, are shown and skipped.
-pub async fn reply(c: &mut Client, want: &str, wait: Duration) -> Result<()> {
-    loop {
-        let l = c.line(wait).await?;
-        if l == want {
-            return Ok(());
-        }
-        if let Some(e) = l.strip_prefix("error: ") {
-            bail!("the board: {e}");
-        }
-        if !l.is_empty() {
-            eprintln!("board: {l}");
-        }
-    }
-}
-
-/// Uploads the script at path, a source or bytecode, to the board at t.
-pub fn upload(path: &Path, name: Option<&str>, t: &Target) -> Result<()> {
-    let (name, data) = bytecode(path, name)?;
-    with_client(t, async |c| {
-        c.send_line(&format!("script put {name} {} {:08x}", data.len(), crc32(&data)))
-            .await?;
-        reply(c, "ready", Duration::from_secs(5)).await?;
-        let mut sent = 0;
-        for chunk in data.chunks(CHUNK) {
-            c.write(chunk).await?;
-            sent += chunk.len();
-            if sent < data.len() {
-                reply(c, &format!("ok {sent}"), Duration::from_secs(5)).await?;
-                eprint!("\rsent {sent}/{} bytes", data.len());
-            }
-        }
-        // The board writes the flash before it answers.
-        reply(c, &format!("done {}", data.len()), Duration::from_secs(30)).await?;
-        c.prompt(Duration::from_secs(5)).await?;
-        eprintln!("\ruploaded {name}: {} bytes", data.len());
-        Ok(())
     })
 }
 

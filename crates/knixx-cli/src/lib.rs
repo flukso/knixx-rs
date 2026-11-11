@@ -70,9 +70,6 @@ pub enum Action {
     Reboot(u8),
     /// Turns the BLE Nordic UART Service on or off.
     Nus(bool),
-    /// Starts the upload of a file over the console, which the command set
-    /// up.
-    Upload,
 }
 
 /// Cmd is a console command. Run writes its replies to the writer.
@@ -237,6 +234,40 @@ fn config_set<C: Ctx>(ctx: &mut C, key: &str, values: &[&str], w: &mut dyn Write
             let _ = writeln!(w, "{key} = {v} (not saved: {err})");
         }
     }
+}
+
+/// Why [`config_load`] refused a configuration file.
+#[derive(Debug, PartialEq, Eq)]
+pub enum LoadError<E> {
+    /// It does not parse.
+    Parse,
+    /// It is for another individual address, and force was not given.
+    Guard,
+    /// The caller refused it: [`Ctx::check`]'s why.
+    Check(&'static str),
+    /// The bus engine's queue is full: nothing changed.
+    QueueFull,
+    /// It applies, but it could not be saved.
+    Save(E),
+}
+
+/// Loads a whole configuration file, as an upload brings it: parses it,
+/// refuses one for another individual address unless force, checks it,
+/// applies it, and saves the bytes as they came, comments and layout
+/// included, so that a pull gives back what was pushed. All or nothing,
+/// but for the save.
+pub fn config_load<C: Ctx>(ctx: &mut C, data: &[u8], force: bool) -> Result<Device, LoadError<C::SaveError>> {
+    let dev = config::parse(data).map_err(|_| LoadError::Parse)?;
+    if !force && dev.individual != ctx.device().individual {
+        return Err(LoadError::Guard);
+    }
+    ctx.check(&dev).map_err(LoadError::Check)?;
+    if !ctx.send(Command::Config(dev)) {
+        return Err(LoadError::QueueFull);
+    }
+    ctx.set_device(dev);
+    ctx.save(data).map_err(LoadError::Save)?;
+    Ok(dev)
 }
 
 /// join concatenates fields into buf. It returns None when they do not fit.

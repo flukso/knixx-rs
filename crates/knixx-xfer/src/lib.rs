@@ -46,7 +46,7 @@ pub const MAX_FIRMWARE: u32 = knixx_image::MAX_IMAGE;
 pub const ACK_EVERY: u32 = 4096;
 
 /// The longest name, as a script's.
-pub const MAX_NAME: usize = knixx_console::upload::MAX_NAME;
+pub const MAX_NAME: usize = knixx_console::name::MAX_NAME;
 
 /// The cap of a kind.
 pub fn cap(kind: Kind) -> u32 {
@@ -98,7 +98,7 @@ pub fn crc32(data: &[u8]) -> u32 {
 /// none.
 pub fn valid_name(kind: Kind, name: &str) -> bool {
     match kind {
-        Kind::Script => knixx_console::upload::valid_name(name),
+        Kind::Script => knixx_console::name::valid_name(name),
         _ => name.is_empty(),
     }
 }

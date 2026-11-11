@@ -26,7 +26,8 @@ use crate::{boot, console, xfer_gatt};
 enum From {
     /// A board on the bus, by its individual address.
     Bus(u16),
-    /// The proxy's own central.
+    /// The proxy's own central (the knixx GATT service).
+    #[cfg_attr(not(feature = "web-ble"), allow(dead_code))]
     Central,
 }
 
@@ -72,6 +73,7 @@ pub fn telegram(tg: &Telegram, own_tg: bool) {
 /// Takes a request of the proxy's central for dest (0: the broadcast):
 /// it goes on the bus, and is answered here too when it is for this board.
 /// Returns false when the bus queue is full.
+#[cfg(feature = "web-ble")]
 pub fn from_central(seq: u8, dest: u16, data: &[u8]) -> bool {
     let me = own();
     if (dest == 0 || dest == me)

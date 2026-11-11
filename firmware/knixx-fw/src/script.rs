@@ -1,34 +1,19 @@
 //! The scripts on the flash: `/scripts/<name>.rhgn`, the bytecode that
-//! `bolt script upload` builds and sends. The `script` command lists and
-//! removes them, and `script put` starts the upload of one, which the
-//! console then receives raw (knixx_console::upload).
+//! `bolt script push` builds and sends over the transfer service
+//! (xfer_gatt). The `script` command lists and removes them.
 
-use core::cell::Cell;
 use core::fmt::Write;
 
-use embassy_sync::blocking_mutex::Mutex;
-use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
 use knixx_cli::Action;
-use knixx_console::upload::{Name, Upload};
+use knixx_console::name::Name;
 
 use crate::console::Ctx;
-use crate::storage::{self, FileError};
+use crate::storage;
 
 /// The directory of the scripts.
 pub const DIR: &str = "/scripts";
 /// The extension of a script's file.
 pub const EXT: &str = ".rhgn";
-
-/// The largest script.
-pub const MAX_SIZE: usize = 16 * 1024;
-
-/// The upload that `script put` asked for, which the console starts.
-static PENDING: Mutex<ThreadModeRawMutex, Cell<Option<Upload>>> = Mutex::new(Cell::new(None));
-
-/// Takes the upload that `script put` asked for.
-pub fn take_pending() -> Option<Upload> {
-    PENDING.lock(|p| p.take())
-}
 
 /// The path of the script named name.
 pub fn path(name: &str) -> heapless::String<64> {
@@ -37,20 +22,14 @@ pub fn path(name: &str) -> heapless::String<64> {
     p
 }
 
-/// Writes data as the script named name.
-pub fn store(name: &str, data: &[u8]) -> Result<(), FileError> {
-    storage::write_file(DIR, &path(name), data)
-}
+const USAGE: &str = "usage: script [ls] | info <name> | rm <name>";
 
-const USAGE: &str = "usage: script [ls] | info <name> | rm <name> | put <name> <size> <crc32>";
-
-/// script [ls] | info <name> | rm <name> | put <name> <size> <crc32>
+/// script [ls] | info <name> | rm <name>
 pub fn command(_: &mut Ctx, args: &[&str], w: &mut dyn Write) -> Action {
     match args {
         [] | ["ls"] => list(w),
         ["info", name] => info(name, w),
         ["rm", name] => rm(name, w),
-        ["put", name, size, crc] => return put(name, size, crc, w),
         _ => {
             let _ = writeln!(w, "{USAGE}");
         }
@@ -151,29 +130,4 @@ fn info(name: &str, w: &mut dyn Write) {
         Ok(None) => writeln!(w, "no script {name}"),
         Err(e) => writeln!(w, "script: {e}"),
     };
-}
-
-fn put(name: &str, size: &str, crc: &str, w: &mut dyn Write) -> Action {
-    let Some(n) = Name::new(name) else {
-        let _ = writeln!(
-            w,
-            "error: bad name {name:?}: 1 to {} letters, digits, - and _",
-            knixx_console::upload::MAX_NAME
-        );
-        return Action::None;
-    };
-    let size = match size.parse::<usize>() {
-        Ok(s) if (1..=MAX_SIZE).contains(&s) => s,
-        _ => {
-            let _ = writeln!(w, "error: size {size:?} is not 1 to {MAX_SIZE} bytes");
-            return Action::None;
-        }
-    };
-    let Ok(crc) = u32::from_str_radix(crc.trim_start_matches("0x"), 16) else {
-        let _ = writeln!(w, "error: crc32 {crc:?} is not hexadecimal");
-        return Action::None;
-    };
-    let up = Upload::new(n, size, crc, crate::console::now());
-    PENDING.lock(|p| p.set(Some(up)));
-    Action::Upload
 }

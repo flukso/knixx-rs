@@ -21,3 +21,4 @@ serialport = { version = "4.10.1", default-features = false }
 md-5 = "0.11.0"
 knixx-script = { path = "../../crates/knixx-script" }
 knixx-console = { path = "../../crates/knixx-console" }
+knixx-device = { path = "../../crates/knixx-device" }

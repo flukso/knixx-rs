@@ -2,9 +2,10 @@
 //!
 //!     bolt convert  turn the firmware ELF into a signed .kfw, Intel HEX or a binary
 //!     bolt flash    flash a .kfw file over USB through the bootloader's recovery
-//!     bolt fw       stage a .kfw file over the console (USB or BLE), install it
+//!     bolt fw       push a .kfw file over BLE, install it
 //!     bolt term     a terminal on the console, over USB or BLE
-//!     bolt script   make, build and upload scripts; list and remove them
+//!     bolt script   make, build and push scripts; list and remove them
+//!     bolt config   push a whole knixx.ini over BLE
 //!     bolt scan     look for a board's BLE advertising
 //!
 //! Status messages go to stderr.
@@ -119,10 +120,15 @@ enum Cmd {
         wait: u64,
     },
     /// The scripts of the board: make one from the template, build it to
-    /// bytecode, upload it, list and remove the ones on the board.
+    /// bytecode, push it, list and remove the ones on the board.
     Script {
         #[command(subcommand)]
         cmd: ScriptCmd,
+    },
+    /// The board's knixx.ini, whole, over its BLE transfer service.
+    Config {
+        #[command(subcommand)]
+        cmd: ConfigCmd,
     },
     /// Look for a board's BLE advertising, by name or address, and show it.
     Scan {
@@ -256,6 +262,23 @@ enum FwCmd {
 }
 
 #[derive(Subcommand)]
+enum ConfigCmd {
+    /// Push a knixx.ini, in the board's update window (or --open): the
+    /// board checks it, applies it and saves it as it is, or refuses it
+    /// whole. One for another individual address only with --force.
+    Push {
+        file: PathBuf,
+        #[arg(long)]
+        force: bool,
+        /// Open the window first, for this many minutes, over the console.
+        #[arg(long)]
+        open: Option<u8>,
+        #[command(flatten)]
+        board: Board,
+    },
+}
+
+#[derive(Subcommand)]
 enum ScriptCmd {
     /// Write <name>.rhai from the template, to fill in.
     New { name: String },
@@ -265,15 +288,19 @@ enum ScriptCmd {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
-    /// Upload a script, built first when it is source, to the board's
-    /// /scripts.
-    Upload {
+    /// Push a script, built first when it is source, over the board's BLE
+    /// transfer service, in its update window (or --open); the board loads
+    /// it, anew if it ran.
+    Push {
         /// The script: source (.rhai) or bytecode (.rhgn); without an
         /// extension, <script>.rhai, else <script>.rhgn.
         script: PathBuf,
         /// The script's name on the board; the file's name by default.
         #[arg(long)]
         name: Option<String>,
+        /// Open the window first, for this many minutes, over the console.
+        #[arg(long)]
+        open: Option<u8>,
         #[command(flatten)]
         board: Board,
     },
@@ -368,12 +395,23 @@ fn main() -> Result<()> {
             } => push::fw(&file, &board.push_opts(open), install),
             FwCmd::Status { board } => fw::command("fw status", &board.target()),
         },
+        Cmd::Config { cmd } => match cmd {
+            ConfigCmd::Push {
+                file,
+                force,
+                open,
+                board,
+            } => push::config(&file, force, &board.push_opts(open)),
+        },
         Cmd::Script { cmd } => match cmd {
             ScriptCmd::New { name } => script::new(&name),
             ScriptCmd::Build { script, output } => script::build(&script, output.as_deref()),
-            ScriptCmd::Upload { script, name, board } => {
-                script::upload(&script, name.as_deref(), &board.target())
-            }
+            ScriptCmd::Push {
+                script,
+                name,
+                open,
+                board,
+            } => push::script(&script, name.as_deref(), &board.push_opts(open)),
             ScriptCmd::Info { name, source, board } => {
                 script::info(&name, source.as_deref(), &board.target())
             }

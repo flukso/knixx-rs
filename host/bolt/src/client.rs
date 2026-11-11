@@ -228,11 +228,6 @@ impl Client {
         Ok(())
     }
 
-    /// Reads up to the next prompt.
-    pub async fn prompt(&mut self, wait: Duration) -> Result<()> {
-        self.read_until(PROMPT, wait).await.map(|_| ())
-    }
-
     /// Disconnects from BLE; USB closes when dropped.
     pub async fn close(self) {
         if let Link::Ble { p, .. } = self.link {

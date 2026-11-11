@@ -1,7 +1,7 @@
 //! Pushes over a board's transfer service (knixx-xfer on BLE), in its
 //! update window (`upload window <minutes>` on its console, or the KNX
-//! control plane's), without pairing: a signed .kfw today, scripts and the
-//! config next.
+//! control plane's), without pairing: a signed .kfw, a script, or the
+//! whole knixx.ini.
 //!
 //! bolt is the sender: it keeps WINDOW bytes in flight, goes on from each
 //! ack, back on a rewind, and to the last ack when nothing comes
@@ -18,9 +18,10 @@ use btleplug::api::{Characteristic, Peripheral as _, WriteType};
 use btleplug::platform::Peripheral;
 use futures_util::StreamExt;
 use knixx_host::image::Image;
+use knixx_xfer::msg::FORCE;
 use knixx_xfer::msg::{DATA_HEADER, MAX_CONTROL};
 use knixx_xfer::sender::{Event, Sender};
-use knixx_xfer::{Kind, Msg};
+use knixx_xfer::{Kind, MAX_CONFIG, MAX_SCRIPT, Msg};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 
@@ -85,10 +86,7 @@ pub fn fw(path: &Path, o: &Opts, install: bool) -> Result<()> {
         hdr.counter,
         data.len() / 1024
     );
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    let counter = rt.block_on(push_async(Kind::Firmware, "", &data, o))?;
+    let counter = run(push_async(Kind::Firmware, 0, "", &data, o))?;
     eprintln!("staged counter {counter}");
     if install {
         crate::fw::install(&o.console)?;
@@ -96,12 +94,73 @@ pub fn fw(path: &Path, o: &Opts, install: bool) -> Result<()> {
     Ok(())
 }
 
-async fn push_async(kind: Kind, name: &str, data: &[u8], o: &Opts) -> Result<u32> {
+/// Builds the script at path if it is source, and pushes it to the board,
+/// which loads it, anew if it ran.
+pub fn script(path: &Path, name: Option<&str>, o: &Opts) -> Result<()> {
+    let (name, data) = crate::script::bytecode(path, name)?;
+    if data.len() > MAX_SCRIPT as usize {
+        bail!(
+            "{name}: {} bytes, over the {MAX_SCRIPT} a script may have",
+            data.len()
+        );
+    }
+    if let Some(m) = o.open {
+        open_window(&o.console, m)?;
+    }
+    eprintln!("pushing script {name}: {} bytes", data.len());
+    run(push_async(Kind::Script, 0, &name, &data, o))?;
+    eprintln!("the board took {name}");
+    Ok(())
+}
+
+/// Pushes the knixx.ini at path to the board, which checks it, applies it
+/// and saves it as it is; one for another individual address only with
+/// force.
+pub fn config(path: &Path, force: bool, o: &Opts) -> Result<()> {
+    let data = fs::read(path).with_context(|| path.display().to_string())?;
+    if data.len() > MAX_CONFIG as usize {
+        bail!(
+            "{}: {} bytes, over the {MAX_CONFIG} a config may have",
+            path.display(),
+            data.len()
+        );
+    }
+    // The board says only that a file does not parse: say where here.
+    let dev = knixx_device::config::parse(&data).map_err(|e| anyhow!("{}: {e}", path.display()))?;
+    if let Some(m) = o.open {
+        open_window(&o.console, m)?;
+    }
+    eprintln!(
+        "pushing {} for {}: {} bytes",
+        path.display(),
+        knixx_knx::address::IndividualAddress(dev.individual),
+        data.len()
+    );
+    let flags = if force { FORCE } else { 0 };
+    run(push_async(Kind::Config, flags, "", &data, o)).map_err(|e| {
+        if format!("{e}").contains(&format!("{:#04x}", knixx_xfer::code::GUARD)) {
+            anyhow!("{e}: the file is for another board; --force to push it anyway")
+        } else {
+            e
+        }
+    })?;
+    eprintln!("the board took it: applied and saved");
+    Ok(())
+}
+
+fn run<T>(f: impl Future<Output = Result<T>>) -> Result<T> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(f)
+}
+
+async fn push_async(kind: Kind, flags: u8, name: &str, data: &[u8], o: &Opts) -> Result<u32> {
     let (p, _gone) = ble::connect(&o.name, &o.addr, o.wait, "upload window 10").await?;
     let start = Instant::now();
     // The first progress is where the board starts: 0, or where it got to.
     let mut from = None;
-    let r = put(&p, kind, 0, name, data, |acked| {
+    let r = put(&p, kind, flags, name, data, |acked| {
         let from = *from.get_or_insert(acked);
         let rate = (acked - from) as f64 / start.elapsed().as_secs_f64() / 1024.0;
         eprint!(

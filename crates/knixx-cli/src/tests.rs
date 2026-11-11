@@ -418,3 +418,41 @@ fn config_set_checked() {
     assert_eq!(f.out("config set ble.knixx on"), "ble.knixx = on (saved)\n");
     assert!(f.dev.ble.knixx);
 }
+
+/// A whole file loads: checked, applied, saved verbatim, comments and all;
+/// one for another individual address only with force; a bad one, or one
+/// the queue cannot take, changes nothing.
+#[test]
+fn config_load_whole() {
+    let file = b"; the hall\n[device]\nindividual = 7.8.1\n[A]\ngroup = 0/0/2\n[B]\ngroup = 0/0/3\n\n[ble]\ntx_power = 4\n";
+    let mut f = Fake::new(two_switches(0x7801), 4);
+    let dev = config_load(&mut f, file, false).unwrap();
+    assert_eq!(dev.ble.tx_power, 4);
+    assert_eq!(f.dev, dev);
+    assert_eq!(f.queue.len(), 1);
+    assert_eq!(f.saved.as_deref(), Some(&file[..]));
+
+    // Another individual address.
+    let other = b"[device]\nindividual = 1.1.5\n[A]\ngroup = 0/0/2\n[B]\ngroup = 0/0/3\n";
+    let mut f = Fake::new(two_switches(0x7801), 4);
+    assert_eq!(config_load(&mut f, other, false), Err(LoadError::Guard));
+    assert!(f.queue.is_empty() && f.saved.is_none());
+    assert_eq!(config_load(&mut f, other, true).unwrap().individual, 0x1105);
+    assert_eq!(f.dev.individual, 0x1105);
+
+    // Does not parse; refused by check; a full queue.
+    let mut f = Fake::new(two_switches(0x7801), 0);
+    assert_eq!(config_load(&mut f, b"[device]\nindividual = x\n", false), Err(LoadError::Parse));
+    assert_eq!(config_load(&mut f, file, false), Err(LoadError::QueueFull));
+    f.cap = 4;
+    f.no_knixx = Some("not built in");
+    let knixx = b"[device]\nindividual = 7.8.1\n[A]\ngroup = 0/0/2\n[B]\ngroup = 0/0/3\n[ble]\nknixx = on\n";
+    assert_eq!(config_load(&mut f, knixx, false), Err(LoadError::Check("not built in")));
+    assert_eq!(f.dev, two_switches(0x7801));
+    assert!(f.saved.is_none());
+
+    // Applied, but not saved.
+    f.err = Some("flash full");
+    assert_eq!(config_load(&mut f, file, false), Err(LoadError::Save("flash full")));
+    assert_eq!(f.dev.ble.tx_power, 4);
+}

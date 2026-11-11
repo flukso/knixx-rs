@@ -190,6 +190,7 @@ dependencies = [
  "crossterm",
  "futures-util",
  "knixx-console",
+ "knixx-device",
  "knixx-host",
  "knixx-image",
  "knixx-knx",

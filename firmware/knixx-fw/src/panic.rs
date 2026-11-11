@@ -14,7 +14,7 @@ use core::ptr::addr_of_mut;
 
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use knixx_console::upload::{MAX_NAME, Name};
+use knixx_console::name::{MAX_NAME, Name};
 use static_cell::StaticCell;
 
 const MAGIC: u32 = 0x5041_4E43; // "PANC"

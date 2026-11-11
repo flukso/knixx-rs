@@ -6,9 +6,9 @@
 use core::time::Duration;
 
 /// The capacity of `Ring`, a power of two. It holds the writes of a
-/// central while the console is busy: a chunk of an upload (fw put sends
-/// 2 KiB at a time over NUS) and room to spare.
-pub const RING_LEN: usize = 4096;
+/// central while the console is busy: a pasted command of a few packets
+/// and room to spare. Files go over the transfer service, not NUS.
+pub const RING_LEN: usize = 1024;
 
 /// A byte queue for the writes of a central.
 pub struct Ring {

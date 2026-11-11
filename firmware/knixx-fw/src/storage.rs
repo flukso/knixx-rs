@@ -132,6 +132,11 @@ pub fn write_file(dir: &str, path: &str, data: &[u8]) -> Result<(), FileError> {
     })
 }
 
+/// Makes the directory dir, if it is not there.
+pub fn make_dir(dir: &str) -> Result<(), FileError> {
+    with_flash(|fl| knixx_storage::mkdir(fl, dir))
+}
+
 /// Removes the file at path and reports whether it was there.
 pub fn remove_file(path: &str) -> Result<bool, FileError> {
     with_flash(|fl| knixx_storage::remove(fl, path))

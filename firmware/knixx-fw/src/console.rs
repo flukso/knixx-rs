@@ -24,10 +24,8 @@ use knixx_device::thunder::Device;
 use knixx_ui::led::Mode;
 use knixx_ui::switches::HOLD_TIME;
 
-use knixx_console::upload::{Event, Upload};
-
 use crate::link::Uptime;
-use crate::{bonds, boot, leds, link, nus, panic, script, storage, usbcdc};
+use crate::{bonds, boot, leds, link, nus, panic, storage, usbcdc};
 
 const PROMPT: &str = ">>> ";
 
@@ -82,7 +80,7 @@ pub fn pairing_window() -> bool {
     on_nus()
 }
 
-/// The time since boot, for the idle timer and uploads.
+/// The time since boot, for the idle timer.
 pub fn now() -> core::time::Duration {
     core::time::Duration::from_micros(Instant::now().as_micros())
 }
@@ -435,10 +433,6 @@ struct Console {
     was_connected: bool,
     last_panic: Option<panic::Last>,
     ctx: Ctx,
-    /// The upload in progress, which takes the console's input meanwhile,
-    /// and the buffer it fills.
-    upload: Option<Upload>,
-    stage: &'static mut [u8; script::MAX_SIZE],
 }
 
 impl Console {
@@ -485,75 +479,14 @@ impl Console {
                 self.nus_off().await;
                 let _ = writeln!(Out, "nus: off, console back on USB");
             }
-            Action::Upload => {
-                if let Some(up) = script::take_pending() {
-                    self.upload = Some(up);
-                    let _ = writeln!(Out, "ready");
-                }
-            }
             Action::None | Action::Exit => {}
         }
     }
 
-    /// Feeds data to the upload in progress, reporting each chunk, and
-    /// writes the script once it is complete.
-    fn feed_upload(&mut self, data: &[u8]) {
-        let Some(up) = self.upload.as_mut() else {
-            return;
-        };
-        let event = up.feed(data, &mut self.stage[..], now());
-        let (name, size) = (up.name, up.size);
-        let _ = match event {
-            None => return,
-            Some(Event::Ack(n)) => {
-                let _ = writeln!(Out, "ok {n}");
-                return;
-            }
-            Some(Event::Done(n)) => match script::store(name.as_str(), &self.stage[..n]) {
-                Ok(()) => {
-                    // The script task runs it, anew if it ran.
-                    #[cfg(feature = "scripts")]
-                    let _ = crate::runner::CONTROL.try_send(crate::runner::Control::Load(name));
-                    writeln!(Out, "done {n}")
-                }
-                Err(e) => writeln!(Out, "error: {e}"),
-            },
-            Some(Event::BadCrc) => writeln!(Out, "error: CRC mismatch, {size} bytes dropped"),
-        };
-        self.upload = None;
-        Echo.write(PROMPT.as_bytes());
-    }
-
-    /// Ends an upload that saw no byte for upload::TIMEOUT.
-    fn poll_upload(&mut self) {
-        let Some(up) = self.upload else {
-            return;
-        };
-        if up.timed_out(now()) {
-            let _ = writeln!(
-                Out,
-                "error: upload timed out after {} of {} bytes",
-                up.received(),
-                up.size
-            );
-            self.upload = None;
-            Echo.write(PROMPT.as_bytes());
-        }
-    }
-
-    /// Handles the input of the port the console runs on: keys, or the
-    /// bytes of an upload. What follows the line that starts an upload in the
-    /// same packet is dropped: the host waits for ready.
+    /// Handles the keys of the port the console runs on.
     async fn input(&mut self, data: &[u8]) {
-        if self.upload.is_some() {
-            self.feed_upload(data);
-            return;
-        }
         for &b in data {
             self.key(b).await;
-            if self.upload.is_some() {
-                return;
-            }
         }
     }
 
@@ -650,9 +583,7 @@ impl Console {
             Err(_) => Action::None,
         };
         self.act(action).await;
-        if self.upload.is_none() {
-            Echo.write(PROMPT.as_bytes());
-        }
+        Echo.write(PROMPT.as_bytes());
     }
 }
 
@@ -682,16 +613,10 @@ pub async fn task() -> ! {
         was_connected: false,
         last_panic: panic::last(),
         ctx: Ctx,
-        upload: None,
-        stage: {
-            static STAGE: static_cell::StaticCell<[u8; script::MAX_SIZE]> = static_cell::StaticCell::new();
-            STAGE.init([0; script::MAX_SIZE])
-        },
     };
     loop {
         con.poll_nus().await;
         con.poll_switches().await;
-        con.poll_upload();
         match select3(USB_RX.receive(), nus::RX_READY.wait(), Timer::after_millis(100)).await {
             Either3::First((buf, n)) => {
                 con.new_usb_session();

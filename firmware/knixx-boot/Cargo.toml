@@ -16,5 +16,6 @@ embedded-storage = "0.3"
 static_cell = "2.1.1"
 ed25519-compact = { version = "2.6.0", default-features = false, features = ["opt_size"] }
 knixx-image = { path = "../../crates/knixx-image" }
+knixx-xfer = { path = "../../crates/knixx-xfer" }
 knixx-storage = { path = "../../crates/knixx-storage" }
 knixx-qspi = { path = "../knixx-qspi" }

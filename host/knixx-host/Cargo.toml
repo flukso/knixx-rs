@@ -16,6 +16,7 @@ btleplug = { version = "0.13.5", optional = true }
 tokio = { version = "1.54.1", features = ["rt", "time", "macros"], optional = true }
 futures-util = { version = "0.3.34", optional = true }
 knixx-image = { path = "../../crates/knixx-image", features = ["sign"] }
+knixx-xfer = { path = "../../crates/knixx-xfer" }
 
 [features]
 default = ["ble"]

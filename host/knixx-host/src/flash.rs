@@ -10,7 +10,12 @@ use std::path::Path;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
+use std::sync::mpsc;
+
 use knixx_image::crc32;
+use knixx_xfer::frame::{self, Decoder, Fed};
+use knixx_xfer::msg::{FORCE, Kind as XKind, Msg};
+use knixx_xfer::sender::{Event, Sender};
 
 use crate::image::Image;
 use crate::usbserial::{self, Kind};
@@ -120,87 +125,107 @@ fn wait_port(kind: Kind, wait: Duration) -> Result<String, String> {
     }
 }
 
-/// A line-based conversation with the bootloader.
-struct Line<'p> {
-    port: &'p mut serialport::TTYPort,
-    name: &'p str,
-    buf: Vec<u8>,
+/// How long the host waits for an answer to a frame before it sends again.
+const FRAME_WAIT: Duration = Duration::from_secs(2);
+/// How often a frame is sent again before the flash gives up.
+const MAX_STALLS: u32 = 8;
+/// How long the bootloader may take to check and write the header.
+const DONE_WAIT: Duration = Duration::from_secs(30);
+
+/// Sends msg to the bootloader, framed.
+fn send(port: &mut serialport::TTYPort, name: &str, m: &Msg) -> Result<(), String> {
+    let mut msg = vec![0u8; frame::MAX_MSG];
+    let n = m.encode(&mut msg).map_err(|_| "message too large".to_string())?;
+    let mut buf = vec![0u8; n + frame::OVERHEAD];
+    let n = frame::encode(&msg[..n], &mut buf).ok_or("frame too large")?;
+    port.write_all(&buf[..n]).map_err(|e| format!("{name}: {e}"))
 }
 
-impl Line<'_> {
-    fn send(&mut self, s: &str) -> Result<(), String> {
-        self.port
-            .write_all(s.as_bytes())
-            .map_err(|e| format!("{}: {e}", self.name))
-    }
-
-    /// Reads until a line that starts with one of want, and returns it;
-    /// a line `error: ...` ends it with that error.
-    fn expect(&mut self, want: &[&str], wait: Duration) -> Result<String, String> {
-        let end = Instant::now() + wait;
-        let mut chunk = [0u8; 256];
-        loop {
-            while let Some(i) = self.buf.iter().position(|&b| b == b'\n') {
-                let raw: Vec<u8> = self.buf.drain(..=i).collect();
-                let line = usbserial::strip(&String::from_utf8_lossy(&raw));
-                let line = line.trim().trim_start_matches(">>> ").to_string();
-                if let Some(e) = line.strip_prefix("error: ") {
-                    return Err(format!("the bootloader: {e}"));
-                }
-                if want.iter().any(|w| line.starts_with(w)) {
-                    return Ok(line);
-                }
-            }
-            if Instant::now() > end {
-                return Err(format!(
-                    "{}: no {want:?} from the bootloader after {wait:?}",
-                    self.name
-                ));
-            }
-            match self.port.read(&mut chunk) {
-                Ok(n) => self.buf.extend_from_slice(&chunk[..n]),
-                Err(e) if e.kind() == ErrorKind::TimedOut || e.kind() == ErrorKind::WouldBlock => {}
-                Err(e) => return Err(format!("{}: {e}", self.name)),
-            }
-        }
-    }
-}
-
-/// Sends data with fw put and boots it.
+/// Sends data, a .kfw, to the bootloader's recovery over the transfer
+/// protocol (knixx_xfer): put, then data in 4 KiB frames, each sent again
+/// when no answer comes, then done. Boots it after.
 fn put(port: &str, data: &[u8], force: bool) -> Result<(), String> {
     let mut p = usbserial::open(port, 115_200).map_err(|e| e.to_string())?;
-    let mut l = Line {
-        port: &mut p,
-        name: port,
-        buf: Vec::new(),
+    let mut reader = p.try_clone_native().map_err(|e| format!("{port}: {e}"))?;
+    // A reader thread finds the frames among the console's text.
+    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+    std::thread::spawn(move || {
+        let mut dec = Decoder::new();
+        let mut buf = [0u8; 512];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => return,
+                Ok(n) => {
+                    for &b in &buf[..n] {
+                        if dec.feed(b) == Fed::Frame && tx.send(dec.message().to_vec()).is_err() {
+                            return;
+                        }
+                    }
+                }
+                Err(e) if matches!(e.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) => {}
+                Err(_) => return,
+            }
+        }
+    });
+    let size = data.len() as u32;
+    let crc = crc32(data);
+    let put = Msg::Put {
+        kind: XKind::Firmware,
+        flags: if force { FORCE } else { 0 },
+        size,
+        crc,
+        name: "",
     };
-    // Past the banner, to a prompt.
-    l.send("\r")?;
-    sleep(Duration::from_millis(200));
-    l.buf.clear();
-    let mut cmd = format!("fw put {} {:08x}", data.len(), crc32(data));
-    if force {
-        cmd.push_str(" force");
-    }
-    l.send(&format!("{cmd}\r"))?;
-    let ready = l.expect(&["ready "], Duration::from_secs(5))?;
-    let chunk: usize = ready["ready ".len()..]
-        .trim()
-        .parse()
-        .map_err(|_| format!("the bootloader: {ready:?}"))?;
-    let mut off = 0;
-    for piece in data.chunks(chunk) {
-        l.port.write_all(piece).map_err(|e| format!("{port}: {e}"))?;
-        off += piece.len();
-        // Erasing and writing internal flash: up to a few hundred ms.
-        if off < data.len() {
-            l.expect(&["ok "], Duration::from_secs(5))?;
+    // put, until the bootloader answers it.
+    let mut from = None;
+    for _ in 0..MAX_STALLS {
+        send(&mut p, port, &put)?;
+        let end = Instant::now() + FRAME_WAIT;
+        while let Some(left) = end.checked_duration_since(Instant::now()) {
+            let Ok(b) = rx.recv_timeout(left) else { break };
+            match Msg::decode(&b) {
+                Some(Msg::Ack(o)) => {
+                    from = Some(o);
+                    break;
+                }
+                Some(Msg::Error { reason, crc: c, .. }) if c == crc || c == 0 => {
+                    return Err(format!("the bootloader: {reason}"));
+                }
+                _ => {}
+            }
+        }
+        if from.is_some() {
+            break;
         }
     }
-    // The checks at the end read all of internal flash.
-    l.expect(&["done "], Duration::from_secs(20))?;
-    l.send("boot\r")?;
-    let _ = l.expect(&["booting"], Duration::from_secs(2));
+    let from = from.ok_or("the bootloader does not answer the transfer protocol")?;
+    if from > 0 {
+        status(format!(
+            "the bootloader has {} KiB of it already: going on from there",
+            from / 1024
+        ));
+    }
+    let chunk = knixx_xfer::ACK_EVERY;
+    let mut sender = Sender::new(size, crc, from, chunk, chunk, MAX_STALLS);
+    loop {
+        while let Some((at, len)) = sender.next_piece() {
+            let bytes = &data[at as usize..(at + len) as usize];
+            send(&mut p, port, &Msg::Data { offset: at, bytes })?;
+        }
+        let wait = if sender.all_acked() { DONE_WAIT } else { FRAME_WAIT };
+        match rx.recv_timeout(wait) {
+            Ok(b) => {
+                let Some(m) = Msg::decode(&b) else { continue };
+                match sender.on(&m).map_err(|e| format!("the bootloader: {e}"))? {
+                    Event::Done(_) => break,
+                    Event::Progress(_) | Event::None => {}
+                }
+            }
+            Err(_) if sender.all_acked() => return Err("no done from the bootloader".into()),
+            Err(_) => sender.silence().map_err(|e| format!("the bootloader: {e}"))?,
+        }
+    }
+    p.write_all(b"boot\r").map_err(|e| format!("{port}: {e}"))?;
     Ok(())
 }
 

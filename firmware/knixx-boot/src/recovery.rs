@@ -2,22 +2,22 @@
 //! bootloader") that takes an image into internal flash, for a board whose
 //! application is gone, broken or to be replaced by hand.
 //!
-//! Its commands, each answered with lines and the prompt ">>> ":
+//! Its text commands, each answered with lines and the prompt ">>> ":
 //!
 //! ```text
-//! version                      the bootloader's version
-//! info                         why it waits, the application, the last install
-//! fw put <size> <crc32> [force] take a .kfw file of size bytes
-//! boot                         reset and boot the application
+//! version   the bootloader's version
+//! info      why it waits, the application, the last install
+//! boot      reset and boot the application
 //! ```
 //!
-//! `fw put` answers `ready 4096`; the host then sends the file in chunks of
-//! 4096 bytes and waits for `ok <offset>` after each. The header comes
-//! first: its key and counter are checked before anything is erased (a
-//! counter not above the installed one only with `force`). The body goes
-//! straight to internal flash; at the end the CRC of the whole file, the
-//! body's CRC and signature, and the CRC of what was written are checked,
-//! and only then is the header written: `done <size>`, or `error: <reason>`.
+//! An image comes in over the transfer protocol (knixx_xfer), in frames
+//! among the text: a put of the firmware kind, then data, stop-and-wait in
+//! frames of 4 KiB. The header comes first: its key and counter are checked
+//! before anything is erased (a counter not above the installed one only
+//! with put's force flag). The body goes straight to internal flash; at the
+//! end the CRC of the whole file, the body's CRC and signature, and the CRC
+//! of what was written are checked, and only then is the header written:
+//! done, or error.
 
 use core::fmt::Write as _;
 
@@ -31,7 +31,10 @@ use embassy_time::{Duration, Timer, with_timeout};
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
 use embassy_usb::driver::EndpointError;
 use embassy_usb::{Builder, UsbDevice};
-use knixx_image::{self as image, HEADER_SIZE, Header, Verifier, Why, result};
+use knixx_image::{self as image, HEADER_SIZE, Header, Refusal, Verifier, Why, result};
+use knixx_xfer::frame::{self, Decoder, Fed};
+use knixx_xfer::msg::{FORCE, Kind, Msg};
+use knixx_xfer::receiver::{Fail, Offer, Out as Reply, Receiver, Sink};
 use static_cell::StaticCell;
 
 use crate::writer::Writer;
@@ -40,10 +43,11 @@ use crate::{BUILT, Irqs, VERSION, app, keys, led, reset};
 type UsbDriver = Driver<'static, HardwareVbusDetect>;
 type Class = CdcAcmClass<'static, UsbDriver>;
 
-/// The chunk the host sends before it waits for an ok.
-const CHUNK: usize = 4096;
-/// How long an upload waits for the next packet.
-const TIMEOUT: Duration = Duration::from_secs(5);
+/// A frame that stalls this long halfway is dropped: its rest is not
+/// coming, and the host sends it again.
+const STALL: Duration = Duration::from_millis(500);
+/// After this long without data, in ms, a new put replaces a transfer.
+const IDLE_MS: u64 = 10_000;
 /// The largest USB packet of the CDC data endpoints.
 const PACKET: usize = 64;
 
@@ -52,9 +56,102 @@ const PROMPT: &str = ">>> ";
 /// What the console knows.
 struct Ctx {
     why: Why,
-    app: Option<Header>,
     last: u8,
+    sink: BootSink,
+}
+
+/// The firmware coming in: its header first, checked before anything is
+/// erased, then its body, straight into internal flash.
+struct BootSink {
     nvmc: Nvmc<'static>,
+    /// The installed application, while it is valid.
+    app: Option<Header>,
+    force: bool,
+    raw: [u8; HEADER_SIZE],
+    got: usize,
+    size: u32,
+    verifier: Option<Verifier>,
+    writer: Option<Writer>,
+}
+
+/// A short reason for a refusal.
+fn refusal(r: Refusal) -> Fail {
+    let reason = match r {
+        Refusal::Header(_) => "bad header",
+        Refusal::Length => "length mismatch",
+        Refusal::Crc => "body CRC mismatch",
+        Refusal::UnknownKey(_) => "unknown key",
+        Refusal::Signature => "bad signature",
+        Refusal::Downgrade { .. } => "downgrade",
+        Refusal::TooLarge(_) => "too large",
+    };
+    Fail::new(r.code(), reason)
+}
+
+impl Sink for BootSink {
+    fn open(&mut self, _: Kind, _: &str, size: u32, flags: u8) -> Result<(), Fail> {
+        image::check_size(size).map_err(refusal)?;
+        self.force = flags & FORCE != 0;
+        self.got = 0;
+        self.size = size;
+        self.verifier = None;
+        self.writer = None;
+        Ok(())
+    }
+
+    fn write(&mut self, mut data: &[u8]) -> Result<(), Fail> {
+        if self.got < HEADER_SIZE {
+            let n = (HEADER_SIZE - self.got).min(data.len());
+            self.raw[self.got..self.got + n].copy_from_slice(&data[..n]);
+            self.got += n;
+            data = &data[n..];
+            if self.got < HEADER_SIZE {
+                return Ok(());
+            }
+            // The whole header: check it before anything is erased.
+            let v = Verifier::new(&self.raw, keys()).map_err(refusal)?;
+            if v.header().file_size() != self.size {
+                return Err(refusal(Refusal::Length));
+            }
+            image::check_counter(v.header(), self.app.as_ref(), self.force).map_err(refusal)?;
+            self.app = None;
+            self.writer = Some(
+                Writer::begin(&mut self.nvmc)
+                    .map_err(|_| Fail::new(knixx_xfer::code::STORAGE, "erase failed"))?,
+            );
+            self.verifier = Some(v);
+            led::set(led::State::Writing);
+        }
+        if data.is_empty() {
+            return Ok(());
+        }
+        let (Some(v), Some(w)) = (self.verifier.as_mut(), self.writer.as_mut()) else {
+            return Err(Fail::new(knixx_xfer::code::STATE, "no header"));
+        };
+        v.update(data);
+        w.write(&mut self.nvmc, data)
+            .map_err(|_| Fail::new(knixx_xfer::code::STORAGE, "write failed"))
+    }
+
+    fn finish(&mut self) -> Result<u32, Fail> {
+        let storage = |_| Fail::new(knixx_xfer::code::STORAGE, "write failed");
+        let (Some(v), Some(mut w)) = (self.verifier.take(), self.writer.take()) else {
+            return Err(Fail::new(knixx_xfer::code::STATE, "no header"));
+        };
+        w.flush(&mut self.nvmc).map_err(storage)?;
+        let hdr = v.finish().map_err(refusal)?;
+        if image::crc32(app::body(hdr.len)) != hdr.body_crc {
+            return Err(Fail::new(knixx_xfer::code::STORAGE, "flash CRC mismatch"));
+        }
+        w.commit(&mut self.nvmc, &self.raw).map_err(storage)?;
+        self.app = Some(hdr);
+        Ok(hdr.counter)
+    }
+
+    fn abort(&mut self) {
+        self.verifier = None;
+        self.writer = None;
+    }
 }
 
 pub fn run(why: Why, app: Option<Header>) -> ! {
@@ -89,9 +186,17 @@ pub fn run(why: Why, app: Option<Header>) -> ! {
     let device = builder.build();
     let ctx = Ctx {
         why,
-        app,
         last,
-        nvmc: Nvmc::new(p.NVMC),
+        sink: BootSink {
+            nvmc: Nvmc::new(p.NVMC),
+            app,
+            force: false,
+            raw: [0; HEADER_SIZE],
+            got: 0,
+            size: 0,
+            verifier: None,
+            writer: None,
+        },
     };
 
     static EXECUTOR: StaticCell<Executor> = StaticCell::new();
@@ -178,6 +283,80 @@ async fn send(class: &mut Class, out: &mut Out) -> Result<(), EndpointError> {
     Ok(())
 }
 
+/// Sends a reply of the transfer protocol, framed.
+async fn reply(class: &mut Class, r: Reply) -> Result<(), EndpointError> {
+    let Some(m) = r.msg() else {
+        return Ok(());
+    };
+    let mut msg = [0u8; knixx_xfer::msg::MAX_CONTROL];
+    let Ok(n) = m.encode(&mut msg) else {
+        return Ok(());
+    };
+    let mut buf = [0u8; knixx_xfer::msg::MAX_CONTROL + frame::OVERHEAD];
+    let Some(n) = frame::encode(&msg[..n], &mut buf) else {
+        return Ok(());
+    };
+    for p in buf[..n].chunks(PACKET) {
+        class.write_packet(p).await?;
+    }
+    if n.is_multiple_of(PACKET) {
+        class.write_packet(&[]).await?;
+    }
+    Ok(())
+}
+
+fn now_ms() -> u64 {
+    embassy_time::Instant::now().as_millis()
+}
+
+/// Takes a message of the transfer protocol.
+async fn message(
+    class: &mut Class,
+    ctx: &mut Ctx,
+    rx: &mut Receiver,
+    m: Msg<'_>,
+) -> Result<(), EndpointError> {
+    match m {
+        Msg::Put { .. } => {
+            let Some(offer) = Offer::of(&m) else {
+                return Ok(());
+            };
+            let r = rx.put(&mut ctx.sink, &offer, now_ms());
+            reply(class, r).await
+        }
+        Msg::Data { offset, bytes } => match rx.data(&mut ctx.sink, offset, bytes, now_ms()) {
+            Reply::Complete(size) => {
+                reply(class, Reply::Ack(size)).await?;
+                let r = rx.finish(&mut ctx.sink);
+                led::set(led::State::Usb);
+                if matches!(r, Reply::Done { .. }) {
+                    ctx.last = result::INSTALLED;
+                }
+                reply(class, r).await
+            }
+            r @ Reply::Error { .. } => {
+                led::set(led::State::Usb);
+                reply(class, r).await
+            }
+            r => reply(class, r).await,
+        },
+        Msg::Abort => {
+            rx.abort(&mut ctx.sink);
+            led::set(led::State::Usb);
+            Ok(())
+        }
+        Msg::Get { .. } => {
+            let r = Reply::Error {
+                code: knixx_xfer::code::KIND,
+                crc: 0,
+                reason: "the bootloader sends no files",
+            };
+            reply(class, r).await
+        }
+        _ => Ok(()),
+    }
+}
+
 async fn session(class: &mut Class, ctx: &mut Ctx) -> Result<(), EndpointError> {
     let mut out = Out::new();
     let _ = writeln!(out, "=== knixx bootloader ===");
@@ -187,11 +366,26 @@ async fn session(class: &mut Class, ctx: &mut Ctx) -> Result<(), EndpointError> 
     let mut line = [0u8; 96];
     let mut len = 0;
     let mut pkt = [0u8; PACKET];
+    let mut dec = Decoder::new();
+    let mut rx = Receiver::new(&[Kind::Firmware], IDLE_MS);
     loop {
-        let n = class.read_packet(&mut pkt).await?;
+        let n = match with_timeout(STALL, class.read_packet(&mut pkt)).await {
+            Ok(r) => r?,
+            Err(_) => {
+                // A frame whose rest is not coming: the host sends it again.
+                dec.reset();
+                continue;
+            }
+        };
         for &b in &pkt[..n] {
-            match b {
-                b'\r' | b'\n' => {
+            match dec.feed(b) {
+                Fed::None => {}
+                Fed::Frame => {
+                    if let Some(m) = Msg::decode(dec.message()) {
+                        message(class, ctx, &mut rx, m).await?;
+                    }
+                }
+                Fed::Text(b'\r' | b'\n') => {
                     let cmd = core::str::from_utf8(&line[..len]).unwrap_or("");
                     let cmd = trim(cmd);
                     let _ = writeln!(out);
@@ -202,12 +396,12 @@ async fn session(class: &mut Class, ctx: &mut Ctx) -> Result<(), EndpointError> 
                     send(class, &mut out).await?;
                     len = 0;
                 }
-                0x08 | 0x7F => len = len.saturating_sub(1),
-                _ if len < line.len() => {
+                Fed::Text(0x08 | 0x7F) => len = len.saturating_sub(1),
+                Fed::Text(b) if len < line.len() => {
                     line[len] = b;
                     len += 1;
                 }
-                _ => {}
+                Fed::Text(_) => {}
             }
         }
     }
@@ -218,54 +412,19 @@ fn trim(s: &str) -> &str {
 }
 
 async fn command(class: &mut Class, ctx: &mut Ctx, out: &mut Out, cmd: &str) -> Result<(), EndpointError> {
-    let mut words = cmd.split(' ').filter(|w| !w.is_empty());
-    match (words.next(), words.next()) {
-        (Some("version"), None) => {
+    match cmd {
+        "version" => {
             let _ = writeln!(out, "knixx bootloader {VERSION} built {BUILT}");
         }
-        (Some("info"), None) => info(out, ctx),
-        (Some("boot" | "reset"), None) => {
+        "info" => info(out, ctx),
+        "boot" | "reset" => {
             let _ = writeln!(out, "booting");
             send(class, out).await?;
             Timer::after(Duration::from_millis(50)).await;
             reset(0, result::NONE);
         }
-        (Some("fw"), Some("put")) => {
-            let size = words.next().and_then(|s| s.parse::<u32>().ok());
-            let crc = words
-                .next()
-                .and_then(|s| u32::from_str_radix(s.trim_start_matches("0x"), 16).ok());
-            let force = match words.next() {
-                None => Some(false),
-                Some("force") => Some(true),
-                Some(_) => None,
-            };
-            let (Some(size), Some(crc), Some(force)) = (size, crc, force) else {
-                let _ = writeln!(out, "usage: fw put <size> <crc32> [force]");
-                return Ok(());
-            };
-            let r = upload(class, ctx, out, size, crc, force).await;
-            led::set(led::State::Usb);
-            match r {
-                Ok(()) => {
-                    let _ = writeln!(out, "done {size}");
-                }
-                Err(Fail::Link(e)) => return Err(e),
-                Err(Fail::Msg(m)) => {
-                    let _ = writeln!(out, "error: {m}");
-                    drain(class).await?;
-                }
-                Err(Fail::Refused(r)) => {
-                    let _ = writeln!(out, "error: {r}");
-                    drain(class).await?;
-                }
-            }
-        }
         _ => {
-            let _ = writeln!(
-                out,
-                "unknown command; try version, info, fw put <size> <crc32> [force], boot"
-            );
+            let _ = writeln!(out, "unknown command; try version, info, boot");
         }
     }
     Ok(())
@@ -273,7 +432,7 @@ async fn command(class: &mut Class, ctx: &mut Ctx, out: &mut Out, cmd: &str) -> 
 
 fn info(out: &mut Out, ctx: &Ctx) {
     let _ = writeln!(out, "bootloader {VERSION}, waiting over USB: {}", ctx.why);
-    match &ctx.app {
+    match &ctx.sink.app {
         Some(h) => {
             let _ = writeln!(
                 out,
@@ -298,100 +457,4 @@ fn info(out: &mut Out, ctx: &Ctx) {
     if let Some(l) = last {
         let _ = writeln!(out, "last install: {l} ({:#04x})", ctx.last);
     }
-}
-
-/// Reads and drops what the host still sends after a failed upload, until
-/// the line has been quiet for 200 ms.
-async fn drain(class: &mut Class) -> Result<(), EndpointError> {
-    let mut pkt = [0u8; PACKET];
-    while let Ok(r) = with_timeout(Duration::from_millis(200), class.read_packet(&mut pkt)).await {
-        r?;
-    }
-    Ok(())
-}
-
-enum Fail {
-    Link(EndpointError),
-    Msg(&'static str),
-    Refused(image::Refusal),
-}
-
-impl From<EndpointError> for Fail {
-    fn from(e: EndpointError) -> Self {
-        Fail::Link(e)
-    }
-}
-
-async fn upload(
-    class: &mut Class,
-    ctx: &mut Ctx,
-    out: &mut Out,
-    size: u32,
-    crc: u32,
-    force: bool,
-) -> Result<(), Fail> {
-    image::check_size(size).map_err(Fail::Refused)?;
-    let _ = writeln!(out, "ready {CHUNK}");
-    send(class, out).await?;
-
-    let mut file_crc = image::Crc32::new();
-    let mut raw = [0u8; HEADER_SIZE];
-    let mut got = 0u32;
-    let mut pkt = [0u8; PACKET];
-    let mut verifier: Option<Verifier> = None;
-    let mut writer: Option<Writer> = None;
-    while got < size {
-        let n = match with_timeout(TIMEOUT, class.read_packet(&mut pkt)).await {
-            Ok(r) => r?,
-            Err(_) => return Err(Fail::Msg("timed out")),
-        };
-        let data = &pkt[..n.min((size - got) as usize)];
-        file_crc.update(data);
-        let mut body = data;
-        if (got as usize) < HEADER_SIZE {
-            let k = (HEADER_SIZE - got as usize).min(data.len());
-            raw[got as usize..got as usize + k].copy_from_slice(&data[..k]);
-            body = &data[k..];
-            if got as usize + k == HEADER_SIZE {
-                // The whole header: check it before anything is erased.
-                let v = Verifier::new(&raw, keys()).map_err(Fail::Refused)?;
-                if v.header().file_size() != size {
-                    return Err(Fail::Refused(image::Refusal::Length));
-                }
-                image::check_counter(v.header(), ctx.app.as_ref(), force).map_err(Fail::Refused)?;
-                verifier = Some(v);
-                ctx.app = None;
-                led::set(led::State::Writing);
-                writer = Some(Writer::begin(&mut ctx.nvmc).map_err(|_| Fail::Msg("erasing flash failed"))?);
-            }
-        }
-        if !body.is_empty()
-            && let (Some(v), Some(w)) = (verifier.as_mut(), writer.as_mut())
-        {
-            v.update(body);
-            w.write(body).map_err(|_| Fail::Msg("writing flash failed"))?;
-        }
-        let before = got as usize / CHUNK;
-        got += data.len() as u32;
-        if (got as usize / CHUNK) > before && got < size {
-            let _ = writeln!(out, "ok {}", got as usize / CHUNK * CHUNK);
-            send(class, out).await?;
-        }
-    }
-    if file_crc.finish() != crc {
-        return Err(Fail::Msg("file CRC mismatch"));
-    }
-    let (Some(v), Some(mut w)) = (verifier, writer) else {
-        return Err(Fail::Msg("no header"));
-    };
-    w.flush().map_err(|_| Fail::Msg("writing flash failed"))?;
-    let hdr = v.finish().map_err(Fail::Refused)?;
-    if image::crc32(app::body(hdr.len)) != hdr.body_crc {
-        return Err(Fail::Msg("flash CRC mismatch after writing"));
-    }
-    w.commit(&raw)
-        .map_err(|_| Fail::Msg("writing the header failed"))?;
-    ctx.app = Some(hdr);
-    ctx.last = result::INSTALLED;
-    Ok(())
 }

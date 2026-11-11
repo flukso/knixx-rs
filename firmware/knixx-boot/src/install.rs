@@ -122,12 +122,12 @@ fn copy(qspi: &mut QspiFlash, nvmc: &mut Nvmc<'static>, s: &Staged) -> Result<()
         if n != want {
             return Err(());
         }
-        w.write(&buf[..n]).map_err(|_| ())?;
+        w.write(nvmc, &buf[..n]).map_err(|_| ())?;
         off += n as u32;
     }
-    w.flush().map_err(|_| ())?;
+    w.flush(nvmc).map_err(|_| ())?;
     if image::crc32(app::body(s.hdr.len)) != s.hdr.body_crc {
         return Err(());
     }
-    w.commit(&s.raw).map_err(|_| ())
+    w.commit(nvmc, &s.raw).map_err(|_| ())
 }

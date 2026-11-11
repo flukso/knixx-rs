@@ -1095,6 +1095,7 @@ dependencies = [
  "knixx-image",
  "knixx-qspi",
  "knixx-storage",
+ "knixx-xfer",
  "static_cell",
 ]
 
@@ -1225,6 +1226,15 @@ name = "knixx-vl53l7cx"
 version = "0.1.0"
 dependencies = [
  "embedded-hal-async",
+]
+
+[[package]]
+name = "knixx-xfer"
+version = "0.1.0"
+dependencies = [
+ "knixx-console",
+ "knixx-device",
+ "knixx-image",
 ]
 
 [[package]]

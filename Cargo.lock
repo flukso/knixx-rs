@@ -974,6 +974,7 @@ dependencies = [
  "btleplug",
  "futures-util",
  "knixx-image",
+ "knixx-xfer",
  "object",
  "serialport",
  "thiserror",

@@ -162,6 +162,17 @@ struct Board {
 }
 
 impl Board {
+    /// The board on BLE for a push, and its console.
+    fn push_opts(&self, open: Option<u8>) -> push::Opts {
+        push::Opts {
+            name: self.ble_name.clone(),
+            addr: self.addr.clone(),
+            wait: Duration::from_secs(self.wait),
+            open,
+            console: self.target(),
+        }
+    }
+
     fn target(&self) -> client::Target {
         client::Target {
             port: self.port.clone(),
@@ -217,30 +228,20 @@ enum FleetCmd {
 
 #[derive(Subcommand)]
 enum FwCmd {
-    /// Stage a .kfw file on the board; --install installs it after.
-    Put {
+    /// Stage a .kfw file over the board's BLE transfer service, in its
+    /// update window (upload window <minutes> on its console, or --open),
+    /// without pairing; --install installs it after.
+    Push {
         #[arg(default_value = "build/thunder.kfw")]
         file: PathBuf,
+        /// Open the window first, for this many minutes, over the console.
+        #[arg(long)]
+        open: Option<u8>,
+        /// Install the image once it is staged, over the console.
         #[arg(long)]
         install: bool,
         #[command(flatten)]
         board: Board,
-    },
-    /// Push a .kfw file over the board's fw GATT service, in its update
-    /// window (run fw window <minutes> on its console), without pairing.
-    Push {
-        #[arg(default_value = "build/thunder.kfw")]
-        file: PathBuf,
-        /// The advertised name of the board.
-        #[arg(long, default_value = "knixx")]
-        name: String,
-        /// The BLE address of the board instead of the name: the MAC address
-        /// on Linux, the device UUID on macOS.
-        #[arg(long, default_value = "")]
-        addr: String,
-        /// How long to wait for the board, in seconds.
-        #[arg(long, default_value_t = 30)]
-        wait: u64,
     },
     /// Install the staged image: the board resets into its bootloader.
     Install {
@@ -358,14 +359,13 @@ fn main() -> Result<()> {
             }
         }
         Cmd::Fw { cmd } => match cmd {
-            FwCmd::Put { file, install, board } => fw::put(&file, &board.target(), install),
             FwCmd::Install { board } => fw::install(&board.target()),
             FwCmd::Push {
                 file,
-                name,
-                addr,
-                wait,
-            } => push::push(&file, &name, &addr, Duration::from_secs(wait)),
+                open,
+                install,
+                board,
+            } => push::fw(&file, &board.push_opts(open), install),
             FwCmd::Status { board } => fw::command("fw status", &board.target()),
         },
         Cmd::Script { cmd } => match cmd {

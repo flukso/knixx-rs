@@ -16,6 +16,7 @@ embedded-hal-async = "1"
 knixx-storage = { path = "../../crates/knixx-storage" }
 knixx-qspi = { path = "../knixx-qspi" }
 knixx-image = { path = "../../crates/knixx-image" }
+knixx-xfer = { path = "../../crates/knixx-xfer" }
 # Small rather than fast: unrolled, its verifier alone takes 280 KB.
 ed25519-compact = { version = "2.6.0", default-features = false, features = ["opt_size"] }
 knixx-ui = { path = "../../crates/knixx-ui" }

@@ -1161,6 +1161,7 @@ dependencies = [
  "knixx-storage",
  "knixx-ui",
  "knixx-vl53l7cx",
+ "knixx-xfer",
  "nrf-mpsl",
  "nrf-sdc",
  "rlsf",

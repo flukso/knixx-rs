@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 knixx-host = { path = "../knixx-host" }
 knixx-image = { path = "../../crates/knixx-image" }
+knixx-xfer = { path = "../../crates/knixx-xfer" }
 knixx-knx = { path = "../../crates/knixx-knx" }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"

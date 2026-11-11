@@ -35,7 +35,7 @@ use trouble_host::prelude::*;
 
 #[cfg(feature = "web-ble")]
 use crate::knixx_gatt;
-use crate::{bonds, console, fw_gatt, link, nus};
+use crate::{bonds, console, link, nus, xfer_gatt};
 
 /// Outgoing and incoming L2CAP buffers per link.
 const L2CAP_TXQ: u8 = 3;
@@ -90,7 +90,7 @@ const NUS_UUID_LE: [u8; 16] = [
 
 /// The size of the attribute table: the services' attributes, and the GAP
 /// and GATT services that ble_task adds, Service Changed included.
-const ATTRIBUTES: usize = 52;
+const ATTRIBUTES: usize = 56;
 
 /// The GATT database as centrals see it: the Service Changed
 /// characteristic, and the hash of the database, which bonds keep.
@@ -105,7 +105,7 @@ static DB: OnceLock<Db> = OnceLock::new();
 #[gatt_server(attribute_table_size = ATTRIBUTES)]
 struct Server {
     nus: NusService,
-    fw: fw_gatt::FwService,
+    xfer: xfer_gatt::XferService,
 }
 
 #[cfg(feature = "web-ble")]
@@ -113,7 +113,7 @@ struct Server {
 struct Server {
     nus: NusService,
     knixx: knixx_gatt::KnixxService,
-    fw: fw_gatt::FwService,
+    xfer: xfer_gatt::XferService,
 }
 
 /// The Nordic UART Service: the central writes RX and is notified on TX.
@@ -277,11 +277,11 @@ async fn serve(
     let mut nus_on = false;
     let mut adv_failed = false;
     loop {
-        if !nus_on && !knixx_on() && !fw_gatt::window_open() {
+        if !nus_on && !knixx_on() && !xfer_gatt::window_open() {
             match select3(
                 nus::CONTROL.wait(),
                 bonds::CHANGED.wait(),
-                fw_gatt::window_change(),
+                xfer_gatt::window_change(),
             )
             .await
             {
@@ -347,8 +347,8 @@ async fn serve(
         // closes stops it too, unless NUS or the knixx service keep it on.
         let window_shut = async {
             loop {
-                fw_gatt::window_change().await;
-                if !fw_gatt::window_open() && !nus_on && !knixx_on() {
+                xfer_gatt::window_change().await;
+                if !xfer_gatt::window_open() && !nus_on && !knixx_on() {
                     return;
                 }
             }
@@ -396,13 +396,13 @@ async fn serve(
         let _ = conn.raw().set_bondable(console::pairing_window());
         if allowed(&conn) {
             nus::CONNECTED.store(true, Ordering::Relaxed);
-        } else if !fw_gatt::window_open() {
+        } else if !xfer_gatt::window_open() {
             // The central's OS pairs, or encrypts with its bond, at once. In
             // an update window it is not asked to: the fw service needs no
             // pairing.
             let _ = conn.raw().request_security();
         }
-        fw_gatt::reset();
+        xfer_gatt::reset();
         #[cfg(feature = "web-ble")]
         knixx_gatt::reset();
         let mut first = true;
@@ -816,11 +816,11 @@ async fn knixx(server: &'static Server<'static>, conn: &Conn) {
     #[cfg(feature = "web-ble")]
     select(
         knixx_gatt::serve(&server.knixx, conn),
-        fw_gatt::serve(&server.fw, conn),
+        xfer_gatt::serve(&server.xfer, conn),
     )
     .await;
     #[cfg(not(feature = "web-ble"))]
-    fw_gatt::serve(&server.fw, conn).await;
+    xfer_gatt::serve(&server.xfer, conn).await;
 }
 
 /// The handle a GATT request is for.
@@ -900,14 +900,14 @@ async fn events(stack: &'static Stack, server: &'static Server<'static>, conn: &
                     continue;
                 }
                 if let GattEvent::Write(w) = &event
-                    && w.handle() == server.fw.ctrl.handle
+                    && w.handle() == server.xfer.ctrl.handle
                 {
-                    w.with_data(|_, data| fw_gatt::ctrl(data));
+                    w.with_data(|_, data| xfer_gatt::ctrl(data));
                 }
                 if let GattEvent::Write(w) = &event
-                    && w.handle() == server.fw.data.handle
+                    && w.handle() == server.xfer.data.handle
                 {
-                    w.with_data(|_, data| fw_gatt::data(data));
+                    w.with_data(|_, data| xfer_gatt::data(data));
                 }
                 if let GattEvent::Write(w) = &event
                     && w.handle() == rx

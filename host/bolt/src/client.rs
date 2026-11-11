@@ -181,25 +181,6 @@ impl Client {
         }
     }
 
-    /// Reads the next line, as line does, or None when none comes within
-    /// wait.
-    pub async fn line_within(&mut self, wait: Duration) -> Result<Option<String>> {
-        let deadline = tokio::time::Instant::now() + wait;
-        loop {
-            if let Some(i) = self.text.find('\n') {
-                let rest = self.text.split_off(i + 1);
-                let l = std::mem::replace(&mut self.text, rest);
-                return Ok(Some(usbserial::strip(&l).trim_end().to_string()));
-            }
-            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
-            match timeout(left, self.incoming.recv()).await {
-                Ok(Some(b)) => self.text.push_str(&String::from_utf8_lossy(&b)),
-                Ok(None) => bail!("the board went away"),
-                Err(_) => return Ok(None),
-            }
-        }
-    }
-
     /// Reads the next line, without its line end and escape sequences.
     pub async fn line(&mut self, wait: Duration) -> Result<String> {
         let l = self.read_until("\n", wait).await?;

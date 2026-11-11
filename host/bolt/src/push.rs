@@ -1,70 +1,83 @@
-//! bolt fw push: stages a .kfw on a board over its fw GATT service, in its
-//! update window (`fw window <minutes>` on its console), without pairing.
-//! The board takes data only at the offset it expects and acks every
-//! 4 KiB; this keeps WINDOW bytes in flight, goes back on a rewind, and to
-//! the last ack when nothing comes.
+//! Pushes over a board's transfer service (knixx-xfer on BLE), in its
+//! update window (`upload window <minutes>` on its console, or the KNX
+//! control plane's), without pairing: a signed .kfw today, scripts and the
+//! config next.
+//!
+//! bolt is the sender: it keeps WINDOW bytes in flight, goes on from each
+//! ack, back on a rewind, and to the last ack when nothing comes
+//! ([`knixx_xfer::sender::Sender`]). CoreBluetooth holds writes without
+//! response back until it can send them; BlueZ does not, which is why the
+//! window and the rewind are there. No sleeps.
 
 use std::fs;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
-use btleplug::api::{Peripheral as _, WriteType};
+use btleplug::api::{Characteristic, Peripheral as _, WriteType};
+use btleplug::platform::Peripheral;
 use futures_util::StreamExt;
 use knixx_host::image::Image;
-use knixx_image::crc32;
+use knixx_xfer::msg::{DATA_HEADER, MAX_CONTROL};
+use knixx_xfer::sender::{Event, Sender};
+use knixx_xfer::{Kind, Msg};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 use crate::ble;
+use crate::client::Target;
 
-pub const FW_SERVICE: &str = "6b6e7810-1b5d-4c8e-a2f0-3e5b9d8c7a10";
-const FW_CTRL: &str = "6b6e7811-1b5d-4c8e-a2f0-3e5b9d8c7a10";
-const FW_DATA: &str = "6b6e7812-1b5d-4c8e-a2f0-3e5b9d8c7a10";
-
-const BEGIN: u8 = 0x01;
-const ACK: u8 = 0x10;
-const REWIND: u8 = 0x11;
-const DONE: u8 = 0x20;
-const ERROR: u8 = 0x21;
+pub const XFER_SERVICE: &str = "6b6e7810-1b5d-4c8e-a2f0-3e5b9d8c7a10";
+const XFER_CTRL: &str = "6b6e7811-1b5d-4c8e-a2f0-3e5b9d8c7a10";
+const XFER_DATA: &str = "6b6e7812-1b5d-4c8e-a2f0-3e5b9d8c7a10";
 
 /// The bytes in flight before an ack.
-const WINDOW: usize = 16 * 1024;
-/// How long without a notification before going back to the last ack.
+const WINDOW: u32 = 16 * 1024;
+/// How long without a message before going back to the last ack.
 const STALL: Duration = Duration::from_millis(1500);
 /// How often the push goes back without progress before it gives up.
 const MAX_STALLS: u32 = 10;
+/// How long the board may take to answer a put.
+const PUT_WAIT: Duration = Duration::from_secs(10);
+/// How long the board may take to check a file once it has all of it: a
+/// firmware's signature and read-back.
+const DONE_WAIT: Duration = Duration::from_secs(60);
+/// The largest data value the board takes.
+const MAX_DATA: usize = 244;
 
-/// What the board says on ctrl.
-#[derive(Debug)]
-enum Note {
-    Ack(usize),
-    Rewind(usize),
-    Done(u32),
-    Error(u8, String),
+/// Where to push and how: the board on BLE, and its console for the
+/// window and the install.
+pub struct Opts {
+    pub name: String,
+    pub addr: String,
+    pub wait: Duration,
+    /// Open the window first, for this many minutes, over the console.
+    pub open: Option<u8>,
+    pub console: Target,
 }
 
-fn parse(n: &[u8]) -> Option<Note> {
-    let u32_at = |i: usize| {
-        n.get(i..i + 4)
-            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-    };
-    match *n.first()? {
-        ACK => Some(Note::Ack(u32_at(1)? as usize)),
-        REWIND => Some(Note::Rewind(u32_at(1)? as usize)),
-        DONE => Some(Note::Done(u32_at(1)?)),
-        ERROR => Some(Note::Error(
-            *n.get(1)?,
-            String::from_utf8_lossy(n.get(2..).unwrap_or(&[])).into_owned(),
-        )),
-        _ => None,
+/// Opens the board's update window over its console.
+pub fn open_window(t: &Target, minutes: u8) -> Result<()> {
+    let out = crate::script::with_client(t, async |c| {
+        c.command(&format!("upload window {minutes}"), Duration::from_secs(5))
+            .await
+    })?;
+    let out = out.trim();
+    if !out.starts_with("upload: window open") {
+        bail!("the board did not open its window: {out}");
     }
+    eprintln!("{out}");
+    Ok(())
 }
 
-/// Stages the .kfw at path on the board name or addr, over BLE.
-pub fn push(path: &Path, name: &str, addr: &str, wait: Duration) -> Result<()> {
+/// Stages the .kfw at path on the board, over BLE; then installs it over
+/// the console when install.
+pub fn fw(path: &Path, o: &Opts, install: bool) -> Result<()> {
     let data = fs::read(path).with_context(|| path.display().to_string())?;
     let (_, hdr) = Image::from_kfw(&data).with_context(|| path.display().to_string())?;
+    if let Some(m) = o.open {
+        open_window(&o.console, m)?;
+    }
     eprintln!(
         "pushing {}: {} (counter {}, {} KiB)",
         path.display(),
@@ -75,74 +88,135 @@ pub fn push(path: &Path, name: &str, addr: &str, wait: Duration) -> Result<()> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    rt.block_on(push_async(&data, name, addr, wait))
+    let counter = rt.block_on(push_async(Kind::Firmware, "", &data, o))?;
+    eprintln!("staged counter {counter}");
+    if install {
+        crate::fw::install(&o.console)?;
+    }
+    Ok(())
 }
 
-async fn push_async(data: &[u8], name: &str, addr: &str, wait: Duration) -> Result<()> {
-    let (p, _gone) = ble::connect(name, addr, wait, "fw window 10").await?;
+async fn push_async(kind: Kind, name: &str, data: &[u8], o: &Opts) -> Result<u32> {
+    let (p, _gone) = ble::connect(&o.name, &o.addr, o.wait, "upload window 10").await?;
     let start = Instant::now();
-    let counter = push_on(&p, data, |acked| {
-        let rate = acked as f64 / start.elapsed().as_secs_f64() / 1024.0;
+    // The first progress is where the board starts: 0, or where it got to.
+    let mut from = None;
+    let r = put(&p, kind, 0, name, data, |acked| {
+        let from = *from.get_or_insert(acked);
+        let rate = (acked - from) as f64 / start.elapsed().as_secs_f64() / 1024.0;
         eprint!(
             "\rsent {} of {} KiB, {rate:.1} KiB/s ",
             acked / 1024,
             data.len() / 1024
         );
     })
-    .await?;
-    eprintln!(
-        "\rstaged counter {counter} in {:.1} s ({:.1} KiB/s)           ",
-        start.elapsed().as_secs_f32(),
-        data.len() as f64 / 1024.0 / start.elapsed().as_secs_f64()
-    );
+    .await;
+    if r.is_ok() {
+        let sent = data.len() - from.unwrap_or(0);
+        eprintln!(
+            "\rsent {} KiB in {:.1} s ({:.1} KiB/s)           ",
+            sent / 1024,
+            start.elapsed().as_secs_f32(),
+            sent as f64 / 1024.0 / start.elapsed().as_secs_f64()
+        );
+    } else {
+        eprintln!();
+    }
     let _ = p.disconnect().await;
-    Ok(())
+    r
 }
 
-/// Pushes data, a .kfw, over the fw service of the connected board p, and
-/// returns the counter the board staged; progress gets the bytes acked.
-pub async fn push_on(
-    p: &btleplug::platform::Peripheral,
+/// The transfer service of a connected board: its characteristics and the
+/// messages on ctrl.
+struct Link<'p> {
+    p: &'p Peripheral,
+    ctrl: Characteristic,
+    data: Characteristic,
+    notes: mpsc::UnboundedReceiver<Vec<u8>>,
+}
+
+impl<'p> Link<'p> {
+    async fn open(p: &'p Peripheral) -> Result<Link<'p>> {
+        let (Some(ctrl), Some(data)) = (
+            ble::characteristic(p, XFER_SERVICE, XFER_CTRL),
+            ble::characteristic(p, XFER_SERVICE, XFER_DATA),
+        ) else {
+            bail!("the board has no transfer service: its firmware is too old");
+        };
+        let mut notes_in = p.notifications().await.context("ctrl notifications")?;
+        p.subscribe(&ctrl).await.context("ctrl notifications")?;
+        let (tx, notes) = mpsc::unbounded_channel();
+        let uuid = ctrl.uuid;
+        tokio::spawn(async move {
+            while let Some(n) = notes_in.next().await {
+                if n.uuid == uuid && tx.send(n.value).is_err() {
+                    return;
+                }
+            }
+        });
+        Ok(Link { p, ctrl, data, notes })
+    }
+
+    async fn control(&self, m: &Msg<'_>) -> Result<()> {
+        let mut buf = [0u8; MAX_CONTROL];
+        let n = m.encode(&mut buf).map_err(|_| anyhow!("{m:?} too long"))?;
+        self.p
+            .write(&self.ctrl, &buf[..n], WriteType::WithResponse)
+            .await
+            .context("ctrl")
+    }
+
+    /// The next message on ctrl within wait; None when none came, or one
+    /// that does not decode.
+    async fn note(&mut self, wait: Duration) -> Result<Option<Vec<u8>>> {
+        match timeout(wait, self.notes.recv()).await {
+            Ok(Some(n)) => Ok(Some(n)),
+            Ok(None) => bail!("the board went away"),
+            Err(_) => Ok(None),
+        }
+    }
+}
+
+/// Pushes data, a file of kind named name, to the connected board p, and
+/// returns done's info (firmware: the counter staged; the others: the
+/// size); progress gets the bytes acked.
+pub async fn put(
+    p: &Peripheral,
+    kind: Kind,
+    flags: u8,
+    name: &str,
     data: &[u8],
     mut progress: impl FnMut(usize),
 ) -> Result<u32> {
-    let (Some(ctrl), Some(dchar)) = (
-        ble::characteristic(p, FW_SERVICE, FW_CTRL),
-        ble::characteristic(p, FW_SERVICE, FW_DATA),
-    ) else {
-        bail!("the board has no fw service: its firmware is too old");
-    };
-    let mut notes_in = p.notifications().await.context("ctrl notifications")?;
-    p.subscribe(&ctrl).await.context("ctrl notifications")?;
-    let (tx, mut notes) = mpsc::unbounded_channel();
-    let uuid = ctrl.uuid;
-    tokio::spawn(async move {
-        while let Some(n) = notes_in.next().await {
-            if n.uuid == uuid && tx.send(n.value).is_err() {
-                return;
+    let mut link = Link::open(p).await?;
+    let size = u32::try_from(data.len()).context("too large")?;
+    let crc = knixx_xfer::crc32(data);
+    link.control(&Msg::Put {
+        kind,
+        flags,
+        size,
+        crc,
+        name,
+    })
+    .await?;
+    // The board answers ack 0, or where it got to with this very file
+    // after a lost link; a done or error of an earlier transfer is skipped.
+    let deadline = Instant::now() + PUT_WAIT;
+    let from = loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let Some(n) = link.note(left).await? else {
+            if left.is_zero() {
+                bail!("the board did not answer the put");
             }
-        }
-    });
-    let next_note =
-        async |notes: &mut mpsc::UnboundedReceiver<Vec<u8>>, wait: Duration| -> Result<Option<Note>> {
-            match timeout(wait, notes.recv()).await {
-                Ok(Some(n)) => Ok(parse(&n)),
-                Ok(None) => bail!("the board went away"),
-                Err(_) => Ok(None),
-            }
+            continue;
         };
-
-    let mut begin = vec![BEGIN];
-    begin.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    begin.extend_from_slice(&crc32(data).to_le_bytes());
-    p.write(&ctrl, &begin, WriteType::WithResponse)
-        .await
-        .context("begin")?;
-    // The board goes on with an image it has part of, after a lost link.
-    let from = match next_note(&mut notes, Duration::from_secs(10)).await? {
-        Some(Note::Ack(at)) if at <= data.len() => at,
-        Some(Note::Error(c, r)) => bail!("the board: {r} ({c:#04x})"),
-        other => bail!("the board did not take begin: {other:?}"),
+        match Msg::decode(&n) {
+            Some(Msg::Ack(at)) if at <= size => break at,
+            Some(Msg::Error { code, crc: c, reason }) if c == crc || c == 0 => {
+                bail!("the board: {reason} ({code:#04x})")
+            }
+            _ => {}
+        }
     };
     if from > 0 {
         eprintln!(
@@ -150,82 +224,42 @@ pub async fn push_on(
             from / 1024
         );
     }
+    progress(from as usize);
 
-    let mtu = usize::from(p.mtu());
-    let piece = mtu.saturating_sub(3 + 4).clamp(16, 240);
-    let (mut sent, mut acked) = (from, from);
-    let mut stalls = 0;
-    let mut buf = Vec::with_capacity(4 + piece);
-    while acked < data.len() {
-        while sent < data.len() && sent - acked < WINDOW {
-            let end = (sent + piece).min(data.len());
-            buf.clear();
-            buf.extend_from_slice(&(sent as u32).to_le_bytes());
-            buf.extend_from_slice(&data[sent..end]);
-            p.write(&dchar, &buf, WriteType::WithoutResponse)
+    let piece = (usize::from(p.mtu()).saturating_sub(3) - DATA_HEADER).clamp(16, MAX_DATA - DATA_HEADER);
+    let mut s = Sender::new(size, crc, from, WINDOW, piece as u32, MAX_STALLS);
+    let mut buf = Vec::with_capacity(MAX_DATA);
+    let mut done_by = None;
+    loop {
+        while let Some((at, len)) = s.next_piece() {
+            let bytes = &data[at as usize..(at + len) as usize];
+            buf.resize(DATA_HEADER + bytes.len(), 0);
+            let n = Msg::Data { offset: at, bytes }
+                .encode(&mut buf)
+                .map_err(|_| anyhow!("data too long"))?;
+            p.write(&link.data, &buf[..n], WriteType::WithoutResponse)
                 .await
                 .map_err(|e| anyhow!("data: {e}"))?;
-            sent = end;
         }
-        let note = if sent < data.len() && sent - acked < WINDOW {
-            // Room to send: only take what has come.
-            match notes.try_recv() {
-                Ok(n) => parse(&n),
-                Err(_) => continue,
-            }
-        } else {
-            next_note(&mut notes, STALL).await?
-        };
-        match note {
-            Some(Note::Ack(off)) if off >= acked => {
-                if off > acked {
-                    stalls = 0;
+        // Once all is acked, the board checks the file: wait for done.
+        if s.all_acked() && done_by.is_none() {
+            done_by = Some(Instant::now() + DONE_WAIT);
+        }
+        match link.note(STALL).await? {
+            Some(n) => {
+                let Some(m) = Msg::decode(&n) else { continue };
+                match s.on(&m).map_err(|e| anyhow!("the board: {e}"))? {
+                    Event::Done(info) => return Ok(info),
+                    Event::Progress(acked) => progress(acked as usize),
+                    Event::None => {}
                 }
-                acked = off;
-                sent = sent.max(acked);
             }
-            Some(Note::Rewind(off)) => {
-                acked = off;
-                sent = off;
-            }
-            Some(Note::Error(c, r)) => bail!("the board: {r} ({c:#04x})"),
-            Some(Note::Done(counter)) => return Ok(counter),
-            Some(Note::Ack(_)) => {}
             None => {
-                stalls += 1;
-                if stalls > MAX_STALLS {
-                    bail!("no progress at {acked} after {MAX_STALLS} tries");
+                if done_by.is_some_and(|t| Instant::now() >= t) {
+                    bail!("no done from the board");
                 }
-                sent = acked;
+                s.silence().map_err(|e| anyhow!("{e}"))?;
             }
         }
-        progress(acked);
-    }
-    // The board reads the file back before it says done.
-    let deadline = Instant::now() + Duration::from_secs(60);
-    loop {
-        let left = deadline.saturating_duration_since(Instant::now());
-        match next_note(&mut notes, left).await? {
-            Some(Note::Done(counter)) => return Ok(counter),
-            Some(Note::Error(c, r)) => bail!("the board: {r} ({c:#04x})"),
-            Some(_) => {}
-            None if left.is_zero() => bail!("no done from the board"),
-            None => {}
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn notes() {
-        assert!(matches!(parse(&[ACK, 0, 16, 0, 0]), Some(Note::Ack(4096))));
-        assert!(matches!(parse(&[REWIND, 1, 0, 0, 0]), Some(Note::Rewind(1))));
-        assert!(matches!(parse(&[DONE, 7, 0, 0, 0]), Some(Note::Done(7))));
-        assert!(matches!(parse(&[ERROR, 5, b'b', b'a']), Some(Note::Error(5, ref s)) if s == "ba"));
-        assert!(parse(&[ACK, 1]).is_none());
-        assert!(parse(&[]).is_none());
     }
 }

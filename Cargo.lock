@@ -194,6 +194,7 @@ dependencies = [
  "knixx-image",
  "knixx-knx",
  "knixx-script",
+ "knixx-xfer",
  "md-5",
  "serialport",
  "tokio",

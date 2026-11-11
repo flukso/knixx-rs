@@ -19,7 +19,7 @@ use knixx_knx::fw::{self, Act, Board, Request, Response, State, reason};
 use knixx_knx::tp1::Telegram;
 
 use crate::storage::Fs;
-use crate::{boot, console, fw as fwcmd, fw_gatt};
+use crate::{boot, console, xfer_gatt};
 
 /// Who asked.
 #[derive(Clone, Copy)]
@@ -97,12 +97,12 @@ fn board() -> Board {
     let running = boot::header().map_or(0, |h| h.counter);
     // A staged image no newer than what runs never installs.
     let staged = stage::staged(&mut Fs).map(|h| h.counter).filter(|&c| c > running);
-    let receiving = fw_gatt::busy() || fwcmd::console_busy();
+    let receiving = xfer_gatt::busy();
     let state = if receiving {
         State::Receiving
     } else if staged.is_some() {
         State::Staged
-    } else if fw_gatt::last_error() != 0 {
+    } else if xfer_gatt::last_error() != 0 {
         State::Failed
     } else {
         State::Idle
@@ -112,9 +112,9 @@ fn board() -> Board {
         staged,
         state,
         ble: crate::ble::address(),
-        error: fw_gatt::last_error(),
-        progress: fw_gatt::progress(),
-        busy: fwcmd::console_busy(),
+        error: xfer_gatt::last_error(),
+        progress: xfer_gatt::progress(),
+        busy: receiving,
     }
 }
 
@@ -158,8 +158,11 @@ pub async fn task() -> ! {
         }
         match act {
             Act::None => {}
-            Act::Open(minutes) => fw_gatt::set_window(Some(Duration::from_secs(u64::from(minutes) * 60))),
-            Act::Close => fw_gatt::set_window(None),
+            Act::Open(minutes) => xfer_gatt::set_window(Some(Duration::from_secs(u64::from(minutes) * 60))),
+            Act::Close => {
+                xfer_gatt::abort();
+                xfer_gatt::set_window(None)
+            }
             Act::Install => {
                 // Leave the answer time to go out.
                 Timer::after_millis(500).await;

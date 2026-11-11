@@ -1,6 +1,6 @@
 //! Flashing a .kfw file over USB through the bootloader's recovery: reset
 //! the running board into it with the 1200-baud touch (a board that waits
-//! there already is used as it is), send the file with `fw put`, boot it,
+//! there already is used as it is), send the file with knixx-xfer, boot it,
 //! and wait for the board to come back, optionally checking the version it
 //! reports.
 

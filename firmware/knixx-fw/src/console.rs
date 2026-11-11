@@ -27,7 +27,7 @@ use knixx_ui::switches::HOLD_TIME;
 use knixx_console::upload::{Event, Upload};
 
 use crate::link::Uptime;
-use crate::{bonds, boot, fw, leds, link, nus, panic, script, storage, usbcdc};
+use crate::{bonds, boot, leds, link, nus, panic, script, storage, usbcdc};
 
 const PROMPT: &str = ">>> ";
 
@@ -200,7 +200,7 @@ impl knixx_cli::Ctx for Ctx {
     }
 }
 
-const fn commands() -> [Cmd<Ctx>; knixx_cli::NUM_SHARED + 8] {
+const fn commands() -> [Cmd<Ctx>; knixx_cli::NUM_SHARED + 9] {
     let s = knixx_cli::commands::<Ctx>();
     [
         s[0],
@@ -244,13 +244,18 @@ const fn commands() -> [Cmd<Ctx>; knixx_cli::NUM_SHARED + 8] {
         },
         Cmd {
             name: "fw",
-            help: "the firmware: status, put <size> <crc32> (stage a .kfw), install, discard, recovery",
+            help: "the firmware: status, install (the staged image), discard, recovery",
             run: crate::fw::command,
+        },
+        Cmd {
+            name: "upload",
+            help: "the update window, in which the BLE transfer service takes files: window <minutes> | window off",
+            run: crate::fw::upload_command,
         },
     ]
 }
 
-static COMMANDS: [Cmd<Ctx>; knixx_cli::NUM_SHARED + 8] = commands();
+static COMMANDS: [Cmd<Ctx>; knixx_cli::NUM_SHARED + 9] = commands();
 
 fn version(_: &mut Ctx, _: &[&str], w: &mut dyn Write) -> Action {
     let _ = writeln!(w, "{VERSION}");
@@ -434,13 +439,6 @@ struct Console {
     /// and the buffer it fills.
     upload: Option<Upload>,
     stage: &'static mut [u8; script::MAX_SIZE],
-    /// The fw put in progress, which takes the console's input meanwhile.
-    fw: Option<fw::Upload>,
-    /// Input is dropped until then: the rest of a chunk after an upload
-    /// failed.
-    drop_until: Option<core::time::Duration>,
-    /// When to check and stage the complete fw put.
-    finish_at: Option<core::time::Duration>,
 }
 
 impl Console {
@@ -488,18 +486,7 @@ impl Console {
                 let _ = writeln!(Out, "nus: off, console back on USB");
             }
             Action::Upload => {
-                if let Some((size, crc)) = fw::take_pending() {
-                    let chunk = if on_nus() { fw::CHUNK_NUS } else { fw::CHUNK_USB };
-                    match fw::Upload::begin(size, crc, chunk, now()) {
-                        Ok(up) => {
-                            let _ = writeln!(Out, "ready {}", up.chunk());
-                            self.fw = Some(up);
-                        }
-                        Err(e) => {
-                            let _ = writeln!(Out, "error: {e}");
-                        }
-                    }
-                } else if let Some(up) = script::take_pending() {
+                if let Some(up) = script::take_pending() {
                     self.upload = Some(up);
                     let _ = writeln!(Out, "ready");
                 }
@@ -537,85 +524,8 @@ impl Console {
         Echo.write(PROMPT.as_bytes());
     }
 
-    /// Feeds data to the fw put in progress, reporting each chunk, and
-    /// stages the image once it is complete.
-    fn feed_fw(&mut self, data: &[u8]) {
-        let Some(up) = self.fw.as_mut() else {
-            return;
-        };
-        match up.feed(data, now()) {
-            fw::Fed::Ack(n) => {
-                let _ = writeln!(Out, "ok {n}");
-            }
-            fw::Fed::Resend(n) => {
-                let _ = writeln!(Out, "resend {n}");
-                return;
-            }
-            fw::Fed::Failed(e) => {
-                let _ = writeln!(Out, "error: {e}");
-                self.end_fw();
-                return;
-            }
-            _ => return,
-        }
-        if up.complete() {
-            // The ok goes out first: checking the file blocks for seconds,
-            // and the host would take the silence for a lost frame.
-            self.finish_at = Some(now() + core::time::Duration::from_millis(100));
-        }
-    }
-
-    /// Checks and stages the complete fw put, once its last ok went out.
-    fn finish_fw(&mut self) {
-        if self.finish_at.is_none_or(|t| now() < t) {
-            return;
-        }
-        self.finish_at = None;
-        let Some(up) = self.fw.take() else {
-            return;
-        };
-        let size = up.size();
-        let _ = match up.finish() {
-            fw::Fed::Done(h) => writeln!(
-                Out,
-                "done {size}\nfw: staged {} (counter {}); fw install installs it",
-                h.version_str(),
-                h.counter
-            ),
-            fw::Fed::Failed(e) => writeln!(Out, "error: {e}"),
-            _ => Ok(()),
-        };
-        // A frame the host sent again meanwhile is not a command: binary
-        // input is dropped for a moment.
-        self.drop_until = Some(now() + core::time::Duration::from_millis(500));
-        Echo.write(PROMPT.as_bytes());
-    }
-
-    /// Ends a failed fw put: the rest of the chunk on its way is dropped.
-    fn end_fw(&mut self) {
-        self.fw = None;
-        let _ = knixx_image::stage::Files::remove(&mut crate::storage::Fs, knixx_image::STAGED_TMP);
-        self.drop_until = Some(now() + core::time::Duration::from_millis(300));
-        Echo.write(PROMPT.as_bytes());
-    }
-
     /// Ends an upload that saw no byte for upload::TIMEOUT.
     fn poll_upload(&mut self) {
-        self.finish_fw();
-        if let Some(up) = self.fw.as_mut() {
-            up.poll(now());
-        }
-        if let Some(up) = &self.fw
-            && up.timed_out(now())
-        {
-            let _ = writeln!(
-                Out,
-                "error: upload timed out after {} of {} bytes",
-                up.received(),
-                up.size()
-            );
-            self.end_fw();
-        }
         let Some(up) = self.upload else {
             return;
         };
@@ -635,31 +545,13 @@ impl Console {
     /// bytes of an upload. What follows the line that starts an upload in the
     /// same packet is dropped: the host waits for ready.
     async fn input(&mut self, data: &[u8]) {
-        if let Some(t) = self.drop_until {
-            // A stray frame holds binary bytes; a command does not.
-            let binary = data
-                .iter()
-                .any(|&b| !(b.is_ascii_graphic() || matches!(b, b' ' | b'\r' | b'\n' | b'\t')));
-            if now() < t && binary {
-                return;
-            }
-            if now() >= t {
-                self.drop_until = None;
-            }
-        }
-        if self.fw.is_some() {
-            if self.finish_at.is_none() {
-                self.feed_fw(data);
-            }
-            return;
-        }
         if self.upload.is_some() {
             self.feed_upload(data);
             return;
         }
         for &b in data {
             self.key(b).await;
-            if self.upload.is_some() || self.fw.is_some() {
+            if self.upload.is_some() {
                 return;
             }
         }
@@ -758,7 +650,7 @@ impl Console {
             Err(_) => Action::None,
         };
         self.act(action).await;
-        if self.upload.is_none() && self.fw.is_none() {
+        if self.upload.is_none() {
             Echo.write(PROMPT.as_bytes());
         }
     }
@@ -791,9 +683,6 @@ pub async fn task() -> ! {
         last_panic: panic::last(),
         ctx: Ctx,
         upload: None,
-        fw: None,
-        drop_until: None,
-        finish_at: None,
         stage: {
             static STAGE: static_cell::StaticCell<[u8; script::MAX_SIZE]> = static_cell::StaticCell::new();
             STAGE.init([0; script::MAX_SIZE])

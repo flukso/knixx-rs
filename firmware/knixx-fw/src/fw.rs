@@ -1,33 +1,24 @@
-//! The firmware image: what runs, what is staged, and staging a new one
-//! while the firmware runs, for the bootloader to install.
+//! The firmware image: what runs, what is staged, and the update window in
+//! which the transfer service (xfer_gatt) takes files.
 //!
-//! - `fw [status]`: the running image's header, the staged image, and what
-//!   the bootloader did on the last boot.
-//! - `fw put <size> <crc32>`: takes a .kfw file over the console, in chunks
-//!   as `script put` does: `ready <chunk>` (4096 bytes on USB, 2048 on
-//!   NUS); the host sends each chunk as a frame, [offset][CRC][data], and
-//!   waits for `ok <offset>`, or `resend <offset>` for a damaged frame; a
-//!   frame that stalls halfway is dropped, and the host sends it again when
-//!   no answer came. After the last chunk's ok: `done <size>` once the file
-//!   is checked and staged (knixx_image::stage), or `error: <reason>`.
-//! - `fw install`: resets into the bootloader, which installs it.
+//! - `fw [status]`: the running image's header, the staged image, the
+//!   window, and what the bootloader did on the last boot.
+//! - `fw install`: resets into the bootloader, which installs the staged
+//!   image.
 //! - `fw discard`: removes the staged image.
 //! - `fw recovery`: resets into the bootloader's USB recovery.
+//! - `upload [window <minutes> | window off]`: the update window.
 
-use core::cell::Cell;
 use core::fmt::Write;
 use core::sync::atomic::{AtomicU8, Ordering};
-use core::time::Duration;
 
-use embassy_sync::blocking_mutex::Mutex;
-use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
 use knixx_cli::Action;
-use knixx_image::stage::{self, Files, Frame, Frames, StageError, Stager};
+use knixx_image::stage::{self, Files};
 use knixx_image::{self as image, Header, result};
 
 use crate::boot;
 use crate::console::Ctx;
-use crate::storage::{FileError, Fs};
+use crate::storage::Fs;
 
 mod keys {
     include!(concat!(env!("OUT_DIR"), "/keys.rs"));
@@ -38,46 +29,8 @@ pub fn keys() -> image::Keys<'static> {
     image::Keys(keys::KEYS)
 }
 
-/// The chunks of fw put: USB has flow control, NUS has the ring of
-/// knixx_console::nus.
-pub const CHUNK_USB: usize = 4096;
-pub const CHUNK_NUS: usize = 2048;
-
-/// How long an upload waits for the next byte.
-const TIMEOUT: Duration = Duration::from_secs(5);
-
-/// How long a frame may stall halfway before the board drops it: a USB
-/// packet goes missing now and then, and the host sends the frame again.
-const STALL: Duration = Duration::from_millis(500);
-
-/// Counters of fw put, for the probe: packets fed, chunks taken, resends,
-/// frames dropped halfway, timeouts.
-#[unsafe(no_mangle)]
-pub static FW_STATS: [core::sync::atomic::AtomicU32; 5] =
-    [const { core::sync::atomic::AtomicU32::new(0) }; 5];
-
-fn count(i: usize) {
-    FW_STATS[i].fetch_add(1, Ordering::Relaxed);
-}
-
 /// What the bootloader did on this boot, from GPREGRET2.
 pub static LAST_RESULT: AtomicU8 = AtomicU8::new(0);
-
-/// Whether an fw put runs on the console.
-static CONSOLE_BUSY: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-
-/// Whether an fw put runs on the console: the fw service then takes none.
-pub fn console_busy() -> bool {
-    CONSOLE_BUSY.load(Ordering::Relaxed)
-}
-
-/// The fw put that the command asked for, which the console starts.
-static PENDING: Mutex<ThreadModeRawMutex, Cell<Option<(u32, u32)>>> = Mutex::new(Cell::new(None));
-
-/// Takes the fw put that the command asked for: size and CRC-32.
-pub fn take_pending() -> Option<(u32, u32)> {
-    PENDING.lock(|p| p.take())
-}
 
 /// At boot: removes the staged image once it runs, or when it is no newer
 /// than what runs, so that it could never install.
@@ -90,13 +43,43 @@ pub fn tidy() {
     }
 }
 
-const USAGE: &str =
-    "usage: fw [status | put <size> <crc32> | install | discard | window [<minutes> | off] | recovery]";
+const USAGE: &str = "usage: fw [status | install | discard | recovery]";
+const UPLOAD_USAGE: &str = "usage: upload [window <minutes> | window off]";
+
+/// upload [window <minutes> | window off]: the update window, in which the
+/// transfer service takes and gives files without pairing.
+pub fn upload_command(_: &mut Ctx, args: &[&str], w: &mut dyn Write) -> Action {
+    match args {
+        [] | ["window"] => window_status(w),
+        ["window", "off"] => {
+            crate::xfer_gatt::set_window(None);
+            let _ = writeln!(w, "upload: window shut");
+        }
+        ["window", m] => match m.parse::<u64>() {
+            Ok(m @ 1..=60) => {
+                crate::xfer_gatt::set_window(Some(embassy_time::Duration::from_secs(m * 60)));
+                let _ = writeln!(
+                    w,
+                    "upload: window open for {m} min: the transfer service takes signed firmware, scripts and the config, without pairing"
+                );
+            }
+            _ => {
+                let _ = writeln!(w, "upload: window takes 1 to 60 minutes, or off");
+            }
+        },
+        _ => {
+            let _ = writeln!(w, "{UPLOAD_USAGE}");
+        }
+    }
+    Action::None
+}
 
 pub fn command(_: &mut Ctx, args: &[&str], w: &mut dyn Write) -> Action {
     match args {
         [] | ["status"] => status(w),
-        ["put", size, crc] => return put(size, crc, w),
+        ["install" | "discard"] if crate::xfer_gatt::busy() => {
+            let _ = writeln!(w, "fw: a transfer is in progress over BLE");
+        }
         ["install"] => return install(w),
         ["discard"] => match Fs.remove(image::STAGED_PATH) {
             Ok(()) => {
@@ -104,23 +87,6 @@ pub fn command(_: &mut Ctx, args: &[&str], w: &mut dyn Write) -> Action {
             }
             Err(e) => {
                 let _ = writeln!(w, "fw: {e}");
-            }
-        },
-        ["window"] => window_status(w),
-        ["window", "off"] => {
-            crate::fw_gatt::set_window(None);
-            let _ = writeln!(w, "fw: update window shut");
-        }
-        ["window", m] => match m.parse::<u64>() {
-            Ok(m @ 1..=60) => {
-                crate::fw_gatt::set_window(Some(embassy_time::Duration::from_secs(m * 60)));
-                let _ = writeln!(
-                    w,
-                    "fw: update window open for {m} min: the fw service takes a signed image, without pairing"
-                );
-            }
-            _ => {
-                let _ = writeln!(w, "fw: window takes 1 to 60 minutes, or off");
             }
         },
         ["recovery"] => {
@@ -146,12 +112,12 @@ fn describe(h: &Header, w: &mut dyn Write) {
 }
 
 fn window_status(w: &mut dyn Write) {
-    match crate::fw_gatt::window_left() {
+    match crate::xfer_gatt::window_left() {
         Some(d) => {
-            let _ = writeln!(w, "fw: update window open, {} s left", d.as_secs());
+            let _ = writeln!(w, "upload: window open, {} s left", d.as_secs());
         }
         None => {
-            let _ = writeln!(w, "fw: update window shut");
+            let _ = writeln!(w, "upload: window shut");
         }
     }
 }
@@ -184,19 +150,6 @@ fn status(w: &mut dyn Write) {
     let _ = writeln!(w, "fw: on this boot the bootloader {what} ({last:#04x})");
 }
 
-fn put(size: &str, crc: &str, w: &mut dyn Write) -> Action {
-    let Ok(size) = size.parse::<u32>() else {
-        let _ = writeln!(w, "error: size {size:?} is not a number");
-        return Action::None;
-    };
-    let Ok(crc) = u32::from_str_radix(crc.trim_start_matches("0x"), 16) else {
-        let _ = writeln!(w, "error: crc32 {crc:?} is not hexadecimal");
-        return Action::None;
-    };
-    PENDING.lock(|p| p.set(Some((size, crc))));
-    Action::Upload
-}
-
 fn install(w: &mut dyn Write) -> Action {
     match stage::staged(&mut Fs) {
         Some(h) => {
@@ -206,124 +159,8 @@ fn install(w: &mut dyn Write) -> Action {
             Action::Reboot(boot::INSTALL)
         }
         None => {
-            let _ = writeln!(w, "fw: no image staged; fw put one first");
+            let _ = writeln!(w, "fw: no image staged; push one first (bolt fw push)");
             Action::None
-        }
-    }
-}
-
-/// An fw put in progress: framed chunks (knixx_image::stage::Frames) into
-/// the stager.
-pub struct Upload {
-    stager: Stager,
-    frames: Frames,
-    crc: u32,
-    chunk: u32,
-    last: Duration,
-    _busy: Busy,
-}
-
-/// Marks an fw put on the console for as long as it lives.
-struct Busy;
-
-impl Drop for Busy {
-    fn drop(&mut self) {
-        CONSOLE_BUSY.store(false, Ordering::Relaxed);
-    }
-}
-
-/// What feeding an upload brings: a line for the host.
-pub enum Fed {
-    None,
-    /// `ok <offset>`: the chunk is in, the next one may come.
-    Ack(u32),
-    /// `resend <offset>`: the frame was damaged or for another offset.
-    Resend(u32),
-    Done(Header),
-    Failed(StageError<FileError>),
-}
-
-impl Upload {
-    /// Starts an fw put of size bytes with the given CRC-32, at now.
-    pub fn begin(size: u32, crc: u32, chunk: usize, now: Duration) -> Result<Upload, StageError<FileError>> {
-        if crate::fw_gatt::busy() {
-            return Err(StageError::Files(FileError::Busy));
-        }
-        let up = Upload {
-            stager: Stager::begin(&mut Fs, size)?,
-            frames: Frames::new(size, chunk),
-            crc,
-            chunk: chunk as u32,
-            last: now,
-            _busy: Busy,
-        };
-        CONSOLE_BUSY.store(true, Ordering::Relaxed);
-        Ok(up)
-    }
-
-    pub fn chunk(&self) -> u32 {
-        self.chunk
-    }
-
-    /// Takes data, received at now.
-    pub fn feed(&mut self, data: &[u8], now: Duration) -> Fed {
-        self.last = now;
-        count(0);
-        match self.frames.feed(data) {
-            Frame::Partial => Fed::None,
-            Frame::Resend(at) => {
-                count(2);
-                Fed::Resend(at)
-            }
-            Frame::Chunk(_, chunk) => {
-                count(1);
-                let running = boot::header();
-                match self.stager.feed(&mut Fs, chunk, keys(), running.as_ref()) {
-                    Ok(()) => Fed::Ack(self.stager.received()),
-                    Err(e) => Fed::Failed(e),
-                }
-            }
-        }
-    }
-
-    /// Whether all the bytes are in.
-    pub fn complete(&self) -> bool {
-        self.stager.received() == self.stager.size()
-    }
-
-    /// Checks and stages the file, once complete.
-    pub fn finish(self) -> Fed {
-        match self.stager.finish(&mut Fs, Some(self.crc)) {
-            Ok(h) => Fed::Done(h),
-            Err(e) => {
-                let _ = Fs.remove(image::STAGED_TMP);
-                Fed::Failed(e)
-            }
-        }
-    }
-
-    pub fn received(&self) -> u32 {
-        self.stager.received()
-    }
-
-    pub fn size(&self) -> u32 {
-        self.stager.size()
-    }
-
-    pub fn timed_out(&self, now: Duration) -> bool {
-        let t = now.saturating_sub(self.last) >= TIMEOUT;
-        if t {
-            count(4);
-        }
-        t
-    }
-
-    /// Drops a frame whose rest stalled at now, so that the host's next
-    /// send of it starts afresh.
-    pub fn poll(&mut self, now: Duration) {
-        if self.frames.partial() && now.saturating_sub(self.last) >= STALL {
-            count(3);
-            self.frames.drop_partial();
         }
     }
 }

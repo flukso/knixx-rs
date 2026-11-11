@@ -6,8 +6,8 @@
 //!     flash        build, flash over USB through the bootloader's recovery
 //!                  and check the board runs the build
 //!     flash-probe  build, write the bootloader and the firmware over SWD
-//!     fw           build, stage the image over the console (USB or BLE) and
-//!                  install it, with bolt fw put
+//!     fw           build, open the update window over the console, push the
+//!                  image over BLE and install it, with bolt fw push
 //!     term         a terminal on the board's console with bolt term
 //!     cycle        build, then flash n times, checking USB and BLE after each
 //!     golden       record the VL53L7CX golden log with ST's C driver
@@ -58,9 +58,10 @@ tasks:
           build, then write the bootloader and the firmware over SWD with
           arm-none-eabi-gdb [--probe <GDB server port>, default
           /dev/cu.usbmodemB5C8A6F11] [the build's flags]
-  fw      build, then stage the image over the board's console and install
-          it: bolt fw put --install, over USB, else BLE [--ble, --addr,
-          --port: bolt's flags] [the build's flags]
+  fw      build, then open the board's update window over its console,
+          push the image over BLE and install it: bolt fw push --open 10
+          --install [--port, --ble-name, --addr: bolt's flags] [the build's
+          flags]
   term    a terminal on the console, over USB or BLE [bolt term flags]
   golden  record crates/knixx-vl53l7cx/testdata/configure.golden with ST's
           C driver and the harness; --check only compares [$CC, default cc]
@@ -138,8 +139,10 @@ fn main() -> Result<()> {
             let b = build_with(features)?;
             let mut a = vec![
                 "fw".to_string(),
-                "put".into(),
+                "push".into(),
                 b.kfw.display().to_string(),
+                "--open".into(),
+                "10".into(),
                 "--install".into(),
             ];
             a.extend_from_slice(&rest);

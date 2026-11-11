@@ -20,7 +20,6 @@ mod boot;
 mod bus;
 mod console;
 mod fw;
-mod fw_gatt;
 mod fw_knx;
 #[cfg(feature = "scripts")]
 mod heap;
@@ -40,6 +39,7 @@ mod storage;
 mod switches;
 mod tof;
 mod usbcdc;
+mod xfer_gatt;
 
 // MPSL takes the radio, its timers and the clock interrupt; USB's VBUS
 // detection shares the clock interrupt with it.
@@ -126,6 +126,7 @@ async fn main(spawner: Spawner) {
     );
     spawner.spawn(bus::task(uart).unwrap());
     spawner.spawn(fw_knx::task().unwrap());
+    spawner.spawn(xfer_gatt::task().unwrap());
     #[cfg(feature = "scripts")]
     spawner.spawn(runner::task().unwrap());
 

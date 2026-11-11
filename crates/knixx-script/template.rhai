@@ -1,8 +1,8 @@
 // A knixx thunder script, in Rhai: https://rhai.rs/book/
 //
-// Fill in on_info, then build and upload it with
+// Fill in on_info, then build and push it with
 //
-//     bolt script upload <this file>
+//     bolt script push <this file> --open 10
 //
 // The board calls on_init once after loading the script, on_telegram for
 // every telegram on the bus and on_time every second. Each call may take

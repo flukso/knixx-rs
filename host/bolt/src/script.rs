@@ -37,7 +37,7 @@ pub fn new(name: &str) -> Result<()> {
         .replacen("date: \"\"", &format!("date: {:?}", &utc_now()[..10]), 1);
     fs::write(&path, src).with_context(|| path.display().to_string())?;
     eprintln!(
-        "{}: fill in on_info, then: bolt script upload {}",
+        "{}: fill in on_info, then: bolt script push {} --open 10",
         path.display(),
         path.display()
     );

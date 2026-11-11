@@ -1,5 +1,5 @@
 //! Staging an image while the firmware runs: the .kfw file arrives piece by
-//! piece (over the console, or the fw GATT service) and goes to
+//! piece (over the BLE transfer service, knixx-xfer) and goes to
 //! STAGED_TMP, which is renamed to STAGED_PATH once the whole file checks
 //! out. The bootloader installs it from there.
 //!

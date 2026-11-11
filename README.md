@@ -84,7 +84,7 @@ through an onsemi NCN5121 transceiver on UARTE0 at 38400 baud.
   value, over Web Bluetooth and the board's knixx GATT service, see
   [Web app](#web-app).
 - **Scripts.** Up to four scripts in Rhai, written from a template on the
-  host, compiled to Rhai Grain bytecode and uploaded with `bolt script`,
+  host, compiled to Rhai Grain bytecode and pushed with `bolt script`,
   see [Scripts](#scripts). Each gets every telegram on the bus and a call
   every second, keeps its state from call to call, and sends telegrams.
 - **Updates.** Signed images only. Over USB through the bootloader's
@@ -132,7 +132,7 @@ The firmware and the host tools build on macOS and Linux.
 ```sh
 cargo xtask build    # build the bootloader and the firmware: build/thunder.{elf,kfw,hex}, build/thunder-boot.{elf,hex}; --no-scripts, --no-web-ble, --no-coded-phy
 cargo xtask flash    # build and flash over USB through the bootloader's recovery; --port, --force
-cargo xtask fw       # build, stage the image over the console (USB, else BLE) and install it; --ble, --addr
+cargo xtask fw       # build, open the update window, push the image over BLE and install it; --port, --addr
 cargo xtask flash-probe  # build and write the bootloader and the firmware over SWD; --probe
 cargo xtask term     # a terminal on the console, on USB, else BLE; --usb, --ble, --port, --addr
 cargo xtask cycle N  # build, then flash N times, checking USB and BLE after each
@@ -141,7 +141,8 @@ cargo xtask genfw    # extract the VL53L7CX firmware from ST's driver; --check c
 cargo xtask cad      # the renders and the front plate: render, frontplate, readme, clean
 cargo xtask web      # serve the web app on localhost; --build builds it into web/dist/
 cargo test           # the host tests
-bolt script upload <script>  # build <script>.rhai and run it on the board; see Scripts
+bolt script push <script>    # build <script>.rhai and run it on the board; see Scripts
+bolt config push knixx.ini   # the whole configuration, applied live; see Configuration
 ```
 
 ## Building
@@ -156,7 +157,7 @@ writes:
 
 | file | what |
 |---|---|
-| `build/thunder.kfw` | the firmware image, signed: what `bolt flash` and `bolt fw put` send |
+| `build/thunder.kfw` | the firmware image, signed: what `bolt flash` and `bolt fw push` send |
 | `build/thunder.elf` | the firmware with its symbols |
 | `build/thunder.hex` | the image's header and the firmware as they lie in flash, for a probe |
 | `build/thunder-boot.elf`, `.hex` | the bootloader |
@@ -283,7 +284,7 @@ the firmware, so that a board can be flashed without building it:
 
 | file | what |
 |---|---|
-| `thunder.kfw` | the firmware, every feature in, signed with the release key: for `bolt flash` and `bolt fw put` |
+| `thunder.kfw` | the firmware, every feature in, signed with the release key: for `bolt flash` and `bolt fw push` |
 | `thunder.elf` | the firmware with its symbols |
 | `thunder-boot.hex`, `thunder-boot.elf` | the bootloader, for a probe |
 | `bolt-<tag>-<target>.tar.gz` | `bolt` for Linux (x86_64, aarch64) and Apple Silicon macOS |
@@ -332,11 +333,17 @@ builds the firmware and flashes it with `bolt flash`:
    1200-baud touch: it opens the board's serial port at 1200 baud and drops
    DTR. A board that waits in its bootloader already, after a double tap of
    reset, is flashed as it is.
-2. It sends the `.kfw` file with `fw put` in chunks of 4 KiB, each acked
+2. It sends the `.kfw` file with the [transfer protocol](#the-transfer-protocol-knixx-xfer),
+   in frames on the serial stream, one 4 KiB `data` at a time, each acked
    after the bootloader writes it to internal flash. The bootloader checks
-   the header's key and counter before it erases anything (`--force` takes
-   an image whose counter is not above the installed one), and the CRCs and
-   the signature at the end; it writes the header only then. About 30 s.
+   the header's key and counter before it erases anything (`--force` sets
+   `put`'s force flag, which takes an image whose counter is not above the
+   installed one), and the CRCs and the signature at the end; it writes the
+   header only then. About 30 s.
+   - **A lost link:** a `bolt flash` that was cut off goes on from where
+     the bootloader got to, while it waits in its recovery.
+   - **Text and frames** share the stream: a frame starts with 0xA5, which
+     no one types, so `version`, `info` and `boot` still work by hand.
 3. It boots the new firmware, and the flash passes once the board's
    `version` command prints the build just made.
 
@@ -354,76 +361,105 @@ cargo xtask cycle <n>
 builds once, then flashes `n` times; after each flash the board must report
 its version over USB and advertise over BLE.
 
-### Over the console: USB or BLE
+### Over BLE: the transfer service
 
 The firmware stages a new image while it runs, and the bootloader installs
 it:
 
 ```
-cargo xtask fw [--ble] [--addr <address>]
-bolt fw put [build/thunder.kfw] [--install] [--ble] [--addr <address>]
+cargo xtask fw [--port <port>] [--addr <address>]          # build, push --open 10 --install
+bolt fw push [build/thunder.kfw] [--open <minutes>] [--install] [--ble-name knixx | --addr <address>]
 bolt fw install | status
 ```
 
-- **`fw put <size> <crc32>`** on the console takes the `.kfw` file into
-  `/fw/update.tmp` on the QSPI flash's littlefs. The board answers
-  `ready <chunk>`: 4 KiB on USB, 2 KiB on BLE.
-- **Framing:** the host sends each chunk as a frame, its offset and a CRC-32
-  before the data, and waits for `ok <offset>`. A damaged frame gets
-  `resend <offset>`, and a frame without an answer is sent again: a USB
-  link, such as one through a hub or adapter, can lose or damage a packet
-  now and then, and this costs a frame, not the upload.
-- **Checks:** the header is checked as soon as it is in: the size (at most
-  1 MiB, with 64 KiB to spare on the littlefs, so that an image can't crowd
-  out the configuration, the scripts and the bonds), the key, and the
-  counter against the running firmware's. The signature and the CRC are
-  checked as the rest streams through, and the file is read back at the
-  end. Only then is it renamed to `/fw/update.kfw`: `done <size>`.
-- **`fw install`** resets into the bootloader, which installs it (about
-  25 s), and `fw status` then shows what runs, what is staged, and what the
-  bootloader did on the last boot. The firmware removes the staged file once
-  it runs it.
-- **Over BLE,** `fw put` takes a paired central (`ble.pair`) and `nus on`,
-  as the console does.
-- **Over USB** it stages at about 27 KiB/s, so 30 s for the firmware.
+The transfer service stages a signed image over BLE without pairing, for
+an update of many boards from one laptop that is paired with none of them.
+It also takes and gives the per-board files, the scripts and the whole
+`knixx.ini`: see [Scripts](#scripts), [Configuration](#configuration) and
+[An installation's files](#an-installations-files).
+
+- **The window:** the service takes and gives files only in an update
+  window, which `upload window <minutes>` on the console opens (1 to 60),
+  `upload window off` shuts, and the KNX control plane's `open` and
+  `window` open too. `--open <minutes>` has bolt open it over the console
+  (USB, or NUS when paired) first. `upload` and `fw status` show the time
+  left.
+  - While it is open, the board advertises, also without `nus on` or
+    `ble.knixx`.
+  - A central that connects then is not asked to pair. For firmware, the
+    signature keeps out an image that may not install. Scripts and the
+    config are taken as they come: the window is what guards them (see
+    [the risk](#the-windows-risk)). NUS and the knixx service still take
+    only a paired central.
+  - A transfer started in the window may finish after it shuts. The KNX
+    control plane's `close` shuts it and drops a transfer in progress.
+- **The image:** the board checks the header as soon as it is in: the size
+  (at most 1 MiB, with 64 KiB to spare on the littlefs, so that an image
+  can't crowd out the configuration, the scripts and the bonds), the key,
+  and the counter against the running firmware's. The signature and the
+  CRC are checked as the rest streams into `/fw/update.tmp`, and the file
+  is read back at the end; only then is it renamed to `/fw/update.kfw`.
+- **The end:** the board acks the last byte at once, then checks the image
+  for a few seconds (the signature, the read-back) in a task of its own,
+  and notifies `done` with the counter, or `error` with a code and a
+  reason.
+- **Speed:** from a Mac, about 17 KiB/s, so the firmware takes 45 s.
+- **A lost link** costs little: the board keeps what it has, and the next
+  `bolt fw push` of the same image goes on from there.
+- **One transfer at a time** per board: a second request gets `busy`, but
+  after 10 s without data a new push replaces a stuck one.
+- **`fw install`** on the console, or `bolt fw install`, resets into the
+  bootloader, which installs it (about 25 s), and `fw status` then shows
+  what runs, what is staged, and what the bootloader did on the last boot.
+  The firmware removes the staged file once it runs it.
 
 The board keeps working while it stages: only `fw install` resets it.
 
-### Over the fw GATT service, without pairing
+### The transfer protocol: knixx-xfer
 
-```
-fw window 10                      # on the board's console: an update window of 10 minutes
-bolt fw push [build/thunder.kfw] [--name knixx | --addr <address>]
-```
+One protocol (`crates/knixx-xfer`) carries every file: firmware to the
+bootloader's recovery over USB, and firmware, scripts and the config to
+and from the app over BLE.
 
-The fw GATT service stages a signed image over BLE without pairing, for an
-update of many boards from one laptop that is paired with none of them.
+- **Requests:** the host starts every transfer. `put` offers a file, and
+  `get` asks for one. From then on the end with the file is the sender,
+  and the other the receiver: bolt in a push, the board in a pull.
+- **The messages,** little-endian:
 
-- **The window:** the service takes images only in an update window, which
-  `fw window <minutes>` opens (1 to 60) and `fw window off` shuts. `fw
-  status` shows the time left.
-  - While it is open, the board advertises, also without `nus on` or
-    `ble.knixx`.
-  - A central that connects then is not asked to pair: the signature, not
-    the link, keeps out an image that may not install. NUS and the knixx
-    service still take only a paired central.
-- **The protocol:**
-  - **ctrl** (write, notify): `begin` gives the size and the CRC-32.
-  - **data** (write without response): `[offset][bytes]`.
-  - The board takes data only at the offset it expects, and notifies an
-    `ack` every 4 KiB, or a `rewind` to the offset it wants. `bolt fw push`
-    keeps 16 KiB in flight, and goes back to the last ack when nothing
-    comes.
-  - At the end the board checks the image as `fw put` does, and notifies
-    `done` with its counter, or `error` with a code and a reason.
-- **Speed:** from a Mac, about 16 KiB/s, so the firmware takes 47 s; NUS
-  takes 2 minutes.
-- **A lost link** costs little: the board keeps what it has, and the next
-  `bolt fw push` of the same image goes on from there.
-- **Conflicts:** an image is staged by one link at a time. `fw put` on the
-  console and the fw service refuse each other.
+  | message | bytes | from |
+  |---|---|---|
+  | `put` | `0x01, kind, flags, size u32, crc32 u32, name_len, name` | the host; flag 0x01 is force |
+  | `get` | `0x04, kind, name_len, name` | the host |
+  | `file` | `0x05, kind, size u32, crc32 u32, name_len, name`: the file a `get` brings | the board |
+  | `data` | `0x02, offset u32, bytes` | the sender |
+  | `abort` | `0x03` | either |
+  | `ack` | `0x10, offset u32`: the offset the receiver takes next | the receiver |
+  | `rewind` | `0x11, offset u32`: data came for another offset | the receiver |
+  | `done` | `0x20, kind, crc32 u32, info u32`: firmware's counter, else the size | the receiver |
+  | `error` | `0x21, code, crc32 u32, reason` | the receiver, or the board to a request |
 
-`fw install` on the console, or `bolt fw install`, then installs it.
+- **Kinds:** 0 firmware (a signed `.kfw`, pushed only), 1 a script (its
+  bytecode, by name), 2 the whole `knixx.ini`, 3 the script list (pulled
+  only: one `<name> <size> <hash>` line per script, the hash the md5 of the
+  source that the running script reports in `on_info`, or `-`).
+- **Flow:** the receiver takes data only at the offset it expects, and acks
+  every 4 KiB and at the end. The sender keeps 16 KiB in flight over BLE
+  (one 4 KiB frame over USB), goes on from each ack, back on a `rewind`,
+  and to the last ack when nothing comes for 1.5 s. A `done` or `error`
+  carries the file's CRC, so that a late one of an earlier transfer is not
+  taken for this one's.
+- **Over BLE:** two characteristics. `ctrl` (write, notify) carries the
+  requests and the answers; `data` (write without response, notify) the
+  data, the host's in a push and the board's in a pull, in pieces of the
+  link's ATT MTU − 3.
+- **Over USB:** each message is a frame, `0xA5 0x5A, len u16, message,
+  crc32`, its length capped at the largest message, so that a receiver
+  resyncs after garbage.
+- **Resume:** a firmware push only. A pulled file is at most 16 KiB, and a
+  lost pull is asked for again.
+- **Tests:** the codec, the framing, and a sender against the receiver on
+  a simulated link that drops, damages, reorders and duplicates, and breaks
+  mid-file (`cargo test -p knixx-xfer`).
 
 ### An installation: the KNX control plane
 
@@ -435,7 +471,7 @@ bolt fleet scan                        # who is there: board, counter, state, BL
 bolt fleet status <board>              # what a board runs and has staged
 bolt fleet open <board> [file.kfw]     # opens its update window for that image
 bolt fleet install <board> [file.kfw]  # installs it, once staged
-bolt fleet close <board>               # shuts the window
+bolt fleet close <board>               # shuts the window, and drops a transfer in progress
 ```
 
 - **The proxy:** bolt connects to the proxy's knixx service (`--via` or
@@ -459,7 +495,9 @@ bolt fleet close <board>               # shuts the window
 - **Acks:** the board gives its transceiver its individual address
   (U_SetAddress), so that the transceiver acks the telegrams addressed to it.
 - **Open** opens the window only for an image newer than the one that runs
-  (otherwise `Current` or a refusal), at most once every 2 s. **Install**
+  (otherwise `Current` or a refusal), at most once every 2 s. **Window**
+  opens it with no image to check, for scripts and the config, at most as
+  often. Both are refused while a transfer is in progress. **Install**
   installs only the staged image of the counter given.
 
 ### Updating an installation
@@ -495,6 +533,62 @@ scan, the push over the proxy's link and the install, and a second run
 that finds the board current. Between boards on a KNX line, the bus side
 (the broadcast scan, the 1-1 telegrams and their acks, U_SetAddress) still
 waits for a test.
+
+### An installation's files
+
+Firmware is the same on every board; the scripts and the configuration are
+each board's own. They are kept in one folder per board, by its individual
+address, under version control:
+
+```
+fleet/1.1.5/knixx.ini
+fleet/1.1.5/scripts/light.rhai      # or light.rhgn; the source wins
+fleet/1.1.6/knixx.ini
+```
+
+```
+bolt fleet pull fleet [--parallel 4] [--minutes 10]   # every board's knixx.ini and scripts, overwriting
+bolt fleet push fleet [--parallel 4] [--minutes 10] [--force-proxy]
+```
+
+- **Reaching the boards:** as `fleet update` does: a scan over the proxy, a
+  `window` request to each board, then each over BLE by the address it
+  advertises, `--parallel` at a time, the proxy last over its own link. The
+  windows are shut at the end.
+- **Push:** for each board, its `knixx.ini`, then its scripts. What a board
+  has already is skipped: the same config bytes, a script whose source has
+  the hash that the board's script list gives, or a `.rhgn` with the same
+  bytes. A table gives each board's files: pushed, unchanged, or why not.
+  - A `knixx.ini` for another individual address than its folder's stops
+    the run: a fleet run never forces.
+  - A change to the proxy's `ble.knixx` or `ble.pair` is left out unless
+    `--force-proxy`: it could strand the next run.
+  - Folders without a board, and boards without a folder, are listed.
+  - Nothing reboots: the config and the scripts apply live.
+- **Pull:** for each board, its `knixx.ini` and its scripts as bytecode
+  (`<name>.rhgn`), written into its folder, overwriting, with what changed
+  against what was there. A `.rhgn` next to its `.rhai` is a record of what
+  runs; a push takes the source.
+- **The round trip:** pull, push, pull again: the push skips everything,
+  and the folder is as it was (`git status` is clean).
+
+One board at a time: `bolt config pull | push`, `bolt script pull | push`
+(see [Configuration](#configuration) and [Scripts](#scripts)) write and read
+the same layout.
+
+Tested by loopback, with one board as proxy and fleet; between boards on a
+KNX line it still waits for a test.
+
+### The window's risk
+
+The firmware is signed, but the scripts and the config are not: in an
+update window, whoever is in BLE range can read and change them without
+pairing. A window opens only on a command on the console, which takes the
+USB port or a paired central, or on a KNX `open` or `window` request, which
+takes access to the bus. With the bus reachable, someone in BLE range who
+sends a `window` can read or change a board's scripts and configuration
+while its window is open (at most 60 minutes, and shut by `close`). This is
+known and accepted.
 
 ## Console
 
@@ -533,8 +627,9 @@ pulled while a terminal was open, would stall every writer, the bus with
 | `tof` | the ToF state, settings, warnings, motion count and the per zone motion of the last motion frame |
 | `nus [on\|off]` | show the BLE console state, move the console to BLE NUS or back to USB |
 | `ble [link \| forget all\|<address>]` | show the BLE settings and the bonded centrals, the active connection (`link`, see [Radio](#radio)), or forget bonds, see [Pairing](#pairing) |
-| `script [ls] \| info <name> \| rm <name> \| put <name> <size> <crc32>` | the scripts in `/scripts` with their state; what the board knows of one; remove one; `put` receives one, as `bolt script upload` sends it, see [Scripts](#scripts) |
-| `fw [status \| put <size> <crc32> \| install \| discard \| window [<minutes> \| off] \| recovery]` | the firmware: what runs and what is staged; `put` stages an image, as `bolt fw put` sends it; `install` resets into the bootloader to install it; `discard` removes it; `window` opens the fw GATT service for an update without pairing; `recovery` resets into the bootloader's USB recovery, see [Flashing](#over-the-console-usb-or-ble) |
+| `script [ls] \| info <name> \| rm <name>` | the scripts in `/scripts` with their state; what the board knows of one; remove one; `bolt script push` sends them, see [Scripts](#scripts) |
+| `fw [status \| install \| discard \| recovery]` | the firmware: what runs and what is staged (`bolt fw push` stages it); `install` resets into the bootloader to install it; `discard` removes it; `recovery` resets into the bootloader's USB recovery, see [Flashing](#over-ble-the-transfer-service) |
+| `upload [window <minutes> \| window off]` | the update window, in which the BLE transfer service takes and gives firmware, scripts and the config without pairing, see [Flashing](#over-ble-the-transfer-service) |
 | `version` | the commit and build time of the firmware, `version <commit> built <date>`, also shown in the banner |
 | `sys` | the uptime, the stack high-water mark, the heap in use and at most, the scripts running and the telegrams dropped for them, the bytes queued and lost on the USB and BLE console outputs, and whether a USB terminal is open (DTR) |
 
@@ -579,12 +674,12 @@ same, and A off + B on does `nus off`.
   off at boot.
 - **Security:** with `ble.pair` on, the default, only a paired central gets
   the console, see [Pairing](#pairing). With it off, anyone in range can
-  connect while NUS is on and use the console, including `config set` and
-  the upload of scripts, which can send any group telegram.
+  connect while NUS is on and use the console, including `config set`,
+  which can change the group addresses.
 
 ### Pairing
 
-The console on BLE can change the configuration and upload scripts, and
+The console on BLE can change the configuration, and
 the knixx service of the [web app](#web-app) sends any group telegram. So
 while `ble.pair` is on, as it is by default, the board serves both only to
 a **paired** central: a phone or computer that bonded with the board, and
@@ -645,11 +740,12 @@ what the last bonded connection did about it.
 **Without pairing.** `config set ble.pair off` turns the check off at once
 and saves it: anyone in range then gets the console and the knixx service
 while the board advertises. The bonds stay, so turning it on again needs no
-new pairing; a connected central that is not paired is dropped then.
+new pairing; a connected central that is not paired is dropped then, but
+in an update window it keeps the transfer service.
 
-**Updates.** `fw put` over BLE goes through the console, so it takes a
-paired central; and whatever it stages must be signed, see
-[Signed images](#building).
+**Updates.** The transfer service needs no pairing, only an update window;
+an image it stages must be signed, see [Signed images](#building). Scripts
+and the config are not signed: see [the window's risk](#the-windows-risk).
 
 ### Radio
 
@@ -799,6 +895,31 @@ config init                 restore and save the built-in default
   `humidity.group`.
 - **Size:** `knixx.ini` must stay under 1024 bytes.
 
+### The whole file, over BLE
+
+```text
+bolt config pull [--out <dir>] [--open <minutes>]           <dir>/<board>/knixx.ini, overwriting
+bolt config push <knixx.ini> [--force] [--open <minutes>]   check, apply and save it whole
+```
+
+In an update window (see [Flashing](#over-ble-the-transfer-service)), the
+transfer service takes and gives the whole `knixx.ini`; `<board>` is its
+individual address, as [an installation's files](#an-installations-files)
+lay them out.
+
+- **A push** is checked as `config set` checks a value: the board parses
+  it, refuses one for another `device.individual` than its own unless
+  `--force`, applies it, and saves the bytes as they came, comments and
+  layout included, so that a pull gives back what was pushed. A file that
+  does not parse or check is refused whole, and the board keeps its
+  configuration. bolt parses it first, to say where it is wrong.
+- **What applies live:** the group addresses and the occupancy settings at
+  once; `device.individual` at once in the bus engine and the KNX control
+  plane (hence the guard); `ble.tx_power` and `ble.coded` on the transfer's
+  own link (a Mac refuses the coded PHY and stays on 1M); `ble.pair` at
+  once, though an unpaired central in the update window keeps the transfer
+  service; `ble.knixx` at the next advertising.
+
 ### Dependencies and caveats
 
 - **Occupancy needs `occupancy.group`.** While the group is unbound, motion is
@@ -847,17 +968,27 @@ occupied.
 ```
 bolt script new <script>                       # <script>.rhai, from the template
 bolt script build <script>                     # <script>.rhgn: checks that it compiles
-bolt script upload <script>                    # builds it, uploads it, the board runs it
+bolt script push <script> [--open <minutes>]   # builds it, pushes it over BLE, the board runs it
+bolt script pull <script> | --all [--out <dir>]  # <dir>/<board>/scripts/<script>.rhgn, overwriting
 bolt script ls                                 # the scripts on the board, with their state
 bolt script info <script> [--source <script>]  # its on_info, calls, failures, last error
 bolt script rm <script>                        # stops and removes it
 ```
 
-As `bolt term`, the script commands take USB if the board answers there,
-else BLE (`nus on` first); `--port`, `--ble`, `--ble-name` and `--addr` say
-which. A script is named after its file, 1 to 24 letters, digits, `-` and
-`_`; without an extension, `<script>` is `<script>.rhai`, else
-`<script>.rhgn`.
+`push` and `pull` go over the BLE transfer service, in an update window
+(see [Flashing](#over-ble-the-transfer-service)); `--open <minutes>` opens
+it over the console first. The other commands go over the console: as
+`bolt term`, USB if the board answers there, else BLE (`nus on` first);
+`--port`, `--ble`, `--ble-name` and `--addr` say which. A script is named
+after its file, 1 to 24 letters, digits, `-` and `_`; without an
+extension, `<script>` is `<script>.rhai`, else `<script>.rhgn`.
+
+- **A push is skipped** when the board has the script already: the md5 of
+  the source, which a build puts in the script's on_info, against the hash
+  the board's script list gives, or the bytes for a `.rhgn`. `--always`
+  pushes anyway.
+- **A pull** writes the bytecode, and says whether a `<script>.rhai` next
+  to it is the source the board runs.
 
 ### Writing a script
 
@@ -914,19 +1045,19 @@ floats 32-bit.
 | nested calls | 8 |
 | strings, arrays, maps | 256 characters, 64 elements, 32 entries, counted over a value and what it holds, the state too |
 | telegrams sent | 4 per call and 16 per second per script; more return false |
-| script size | 16 KiB of bytecode |
+| script size | 16 KiB of bytecode (`knixx_xfer::MAX_SCRIPT`) |
 | scripts | 4 at a time |
 
 ### On the board
 
 The script task loads `/scripts/*.rhgn` at boot and runs each with its
-on_info and on_init; an upload loads the script anew at once, and
+on_info and on_init; a push loads the script anew at once, and
 `script rm` stops it. Each call runs on a VM of its own, holding the heap's
 grant: the 48 KiB heap is the scripts' alone.
 
 - **Failures.** A failed call is reported on the console, as
   `script <name>: on_telegram: <error>`, and blinks red. Five failures in a
-  row of one function stop the script until it is uploaded again or the
+  row of one function stop the script until it is pushed again or the
   board resets. `script info` shows the last error with the addresses of
   its instructions; `bolt script info <name> --source <file>` rebuilds the
   source as the board's was built and shows their lines.
@@ -941,12 +1072,9 @@ grant: the 48 KiB heap is the scripts' alone.
   calls, failures and longest call. `sys` counts the scripts running and
   the telegrams dropped when the scripts fell behind.
 
-`bolt script upload` sends a script with `script put <name> <size>
-<crc32>`. The console then takes the bytes raw, without editor, echo or
-history, answers `ok <offset>` after each 128 bytes, so that BLE, without
-back-pressure, never overruns it, checks the CRC-32 at the end and writes
-`/scripts/<name>.rhgn` whole, through a temporary file (`done <size>`), or
-answers `error: ...` after a bad CRC or 5 s without a byte.
+A pushed script goes to `/scripts/<name>.tmp`, is read back against its
+CRC-32, and only then takes the place of `/scripts/<name>.rhgn`: a failed
+push leaves the script that ran.
 
 Rhai Grain, Rhai's bytecode VM, came with Rhai 1.27 and is experimental.
 The board reads only bytecode written for its build of Rhai, the integer
@@ -1242,10 +1370,12 @@ the `nus` command, as it alone moves the console.
 ## Host tools
 
 - `bolt`: `bolt flash` flashes a `.kfw` over USB through the bootloader's
-  recovery, `bolt fw` stages one over the console (USB or BLE) and installs
-  it, `bolt term` is the terminal on the console, `bolt script` makes,
-  builds and uploads scripts and lists and removes the ones on the board,
-  `bolt scan` looks for a board's advertising, and `bolt convert` turns the
+  recovery, `bolt fw` stages one over BLE and installs it, `bolt term` is
+  the terminal on the console, `bolt script` makes, builds, pushes and
+  pulls scripts and lists and removes the ones on the board, `bolt config`
+  pushes and pulls the whole `knixx.ini`, `bolt fleet` reaches an
+  installation through a proxy board, `bolt scan` looks for a board's
+  advertising, and `bolt convert` turns the
   firmware ELF into a signed `.kfw`, Intel HEX or a binary. `cargo xtask`
   runs it; `cargo build --release -p bolt` builds it alone, as
   `target/release/bolt`.
@@ -1373,18 +1503,19 @@ folds onto the parabola y = 2x² − 1.
 | `crates/knixx-ncn` | the NCN5121 transceiver's host protocol: requests, the indication parser, their descriptions |
 | `crates/knixx-device` | the device model (switches, sensor and occupancy groups, ToF settings), its INI configuration and `default.ini` |
 | `crates/knixx-bus` | the bus engine: sending with confirmations, stat, occupancy, the sniffer; sans-IO, with an async runner |
-| `crates/knixx-cli` | the shared console commands: switch, sniff, stat, config |
-| `crates/knixx-console` | the line editor, the console output queues, the BLE NUS framing and the upload protocol |
+| `crates/knixx-cli` | the shared console commands: switch, sniff, stat, config; loading a whole `knixx.ini` |
+| `crates/knixx-console` | the line editor, the console output queues, the BLE NUS framing and file names |
 | `crates/knixx-ui` | the status LED player and the wall switch logic |
 | `crates/knixx-sensors` | async SHT2x and VCNL4040 drivers on embedded-hal |
 | `crates/knixx-vl53l7cx` | async VL53L7CX driver, a port of ST's ULD 2.0.1 with the motion plugins; the vendored ULD and the harness that records its golden log |
 | `crates/knixx-storage` | the configuration file and other files, such as the scripts, on littlefs |
 | `crates/knixx-script` | scripts in Rhai Grain: the engine with its limits and the functions scripts call, loading and calling them, the compiler with its checks, and `template.rhai` |
-| `crates/knixx-image` | the `.kfw` image: its header, CRC and ed25519 signature, the bootloader's decisions, staging an image and the framed upload |
+| `crates/knixx-image` | the `.kfw` image: its header, CRC and ed25519 signature, the bootloader's decisions, staging an image |
+| `crates/knixx-xfer` | the transfer protocol: its messages, the stream framing, the receiver and the sender, for firmware, scripts and the config |
 | `firmware/knixx-boot` | the bootloader: boot, install from the QSPI flash, USB recovery |
 | `firmware/knixx-qspi` | the QSPI flash driver, for the firmware and the bootloader |
 | `host/knixx-host` | host library: firmware images (ELF to signed `.kfw`, Intel HEX, binary), the signing keys, the USB serial port, flashing over USB recovery, BLE scanning |
-| `host/bolt` | host tool: `bolt convert`, `flash`, `fw`, `term`, `script`, `scan` |
+| `host/bolt` | host tool: `bolt convert`, `flash`, `fw`, `term`, `script`, `config`, `fleet`, `scan` |
 | `host/knixx-shell` | KNX shell on the host over an FTDI-attached NCN5121 |
 | `web/` | the web app: Leptos to wasm, Web Bluetooth |
 | `xtask/` | `cargo xtask` tasks |

@@ -507,7 +507,8 @@ async fn push_to(p: &Peripheral, data: &[u8], from: u16) -> Result<u32> {
     }
     let label = name(from);
     let mut last_pct = usize::MAX;
-    crate::push::put(p, knixx_xfer::Kind::Firmware, 0, "", data, |acked| {
+    let mut link = crate::xfer::Link::open(p).await?;
+    link.put(knixx_xfer::Kind::Firmware, 0, "", data, |acked| {
         let pct = acked * 100 / data.len().max(1);
         if pct / 10 != last_pct / 10 {
             last_pct = pct;

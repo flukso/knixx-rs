@@ -5,7 +5,7 @@
 //!     bolt fw       push a .kfw file over BLE, install it
 //!     bolt term     a terminal on the console, over USB or BLE
 //!     bolt script   make, build and push scripts; list and remove them
-//!     bolt config   push a whole knixx.ini over BLE
+//!     bolt config   push or pull a whole knixx.ini over BLE
 //!     bolt scan     look for a board's BLE advertising
 //!
 //! Status messages go to stderr.
@@ -15,9 +15,9 @@ mod client;
 mod fleet;
 mod fw;
 mod input;
-mod push;
 mod script;
 mod term;
+mod xfer;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -169,8 +169,8 @@ struct Board {
 
 impl Board {
     /// The board on BLE for a push, and its console.
-    fn push_opts(&self, open: Option<u8>) -> push::Opts {
-        push::Opts {
+    fn push_opts(&self, open: Option<u8>) -> xfer::Opts {
+        xfer::Opts {
             name: self.ble_name.clone(),
             addr: self.addr.clone(),
             wait: Duration::from_secs(self.wait),
@@ -276,6 +276,17 @@ enum ConfigCmd {
         #[command(flatten)]
         board: Board,
     },
+    /// Pull the board's knixx.ini into <out>/<board>/knixx.ini, <board> its
+    /// individual address, overwriting.
+    Pull {
+        #[arg(long, default_value = ".")]
+        out: PathBuf,
+        /// Open the window first, for this many minutes, over the console.
+        #[arg(long)]
+        open: Option<u8>,
+        #[command(flatten)]
+        board: Board,
+    },
 }
 
 #[derive(Subcommand)]
@@ -298,6 +309,24 @@ enum ScriptCmd {
         /// The script's name on the board; the file's name by default.
         #[arg(long)]
         name: Option<String>,
+        /// Push even when the board has the script already.
+        #[arg(long)]
+        always: bool,
+        /// Open the window first, for this many minutes, over the console.
+        #[arg(long)]
+        open: Option<u8>,
+        #[command(flatten)]
+        board: Board,
+    },
+    /// Pull a script, or all of them, from the board into
+    /// <out>/<board>/scripts/<name>.rhgn, overwriting; says whether a
+    /// <name>.rhai there is the source the board runs.
+    Pull {
+        name: Option<String>,
+        #[arg(long, conflicts_with = "name")]
+        all: bool,
+        #[arg(long, default_value = ".")]
+        out: PathBuf,
         /// Open the window first, for this many minutes, over the console.
         #[arg(long)]
         open: Option<u8>,
@@ -392,7 +421,7 @@ fn main() -> Result<()> {
                 open,
                 install,
                 board,
-            } => push::fw(&file, &board.push_opts(open), install),
+            } => xfer::fw(&file, &board.push_opts(open), install),
             FwCmd::Status { board } => fw::command("fw status", &board.target()),
         },
         Cmd::Config { cmd } => match cmd {
@@ -401,7 +430,8 @@ fn main() -> Result<()> {
                 force,
                 open,
                 board,
-            } => push::config(&file, force, &board.push_opts(open)),
+            } => xfer::config(&file, force, &board.push_opts(open)),
+            ConfigCmd::Pull { out, open, board } => xfer::config_pull(&out, &board.push_opts(open)),
         },
         Cmd::Script { cmd } => match cmd {
             ScriptCmd::New { name } => script::new(&name),
@@ -409,9 +439,22 @@ fn main() -> Result<()> {
             ScriptCmd::Push {
                 script,
                 name,
+                always,
                 open,
                 board,
-            } => push::script(&script, name.as_deref(), &board.push_opts(open)),
+            } => xfer::script(&script, name.as_deref(), always, &board.push_opts(open)),
+            ScriptCmd::Pull {
+                name,
+                all,
+                out,
+                open,
+                board,
+            } => {
+                if name.is_none() && !all {
+                    bail!("pull a script by name, or --all");
+                }
+                xfer::script_pull(name.as_deref(), &out, &board.push_opts(open))
+            }
             ScriptCmd::Info { name, source, board } => {
                 script::info(&name, source.as_deref(), &board.target())
             }

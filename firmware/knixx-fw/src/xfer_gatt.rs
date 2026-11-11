@@ -16,6 +16,8 @@
 //! during which the executor blocks on the flash), and then done or error.
 
 use core::cell::RefCell;
+use core::fmt::Write as _;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, ThreadModeRawMutex};
@@ -28,9 +30,10 @@ use knixx_console::name::Name;
 use knixx_device::config;
 use knixx_image::stage::{Files, StageError, Stager};
 use knixx_image::{self as image, Crc32, Refusal};
-use knixx_xfer::code;
-use knixx_xfer::msg::{FORCE, Kind, MAX_CONTROL, Msg};
+use knixx_xfer::msg::{DATA_HEADER, FORCE, Kind, MAX_CONTROL, Msg};
 use knixx_xfer::receiver::{Fail, Offer, Out, Receiver, Sink};
+use knixx_xfer::sender::{Event, Sender};
+use knixx_xfer::{MAX_LIST, code};
 use trouble_host::prelude::*;
 
 use crate::storage::{self, FileError, Fs};
@@ -47,7 +50,7 @@ pub struct XferService {
         write_without_response,
         notify
     )]
-    pub data: heapless::Vec<u8, 244>,
+    pub data: heapless::Vec<u8, MAX_DATA>,
 }
 
 /// The largest value of ctrl: a put with the longest name.
@@ -66,6 +69,28 @@ pub static WINDOW_CHANGED: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
 /// The notifications of ctrl for the central.
 static OUT: Channel<CriticalSectionRawMutex, heapless::Vec<u8, CTRL>, 8> = Channel::new();
+/// The notifications of data for the central: a pull's data.
+static DATA_OUT: Channel<CriticalSectionRawMutex, heapless::Vec<u8, MAX_DATA>, 4> = Channel::new();
+/// The largest value of data.
+const MAX_DATA: usize = 244;
+
+/// A pull the central asked for, and the link's ATT MTU.
+static PULL: Signal<CriticalSectionRawMutex, (Source, u16)> = Signal::new();
+/// The central's answers during a pull: ack, rewind, done, error, abort.
+static PULL_IN: Channel<CriticalSectionRawMutex, heapless::Vec<u8, CTRL>, 4> = Channel::new();
+/// Whether a pull is in progress.
+static PULLING: AtomicBool = AtomicBool::new(false);
+
+/// The bytes a pull keeps in flight.
+const PULL_WINDOW: u32 = 16 * 1024;
+/// How long a pull waits for the central before it goes back to its last
+/// ack.
+const PULL_STALL: Duration = Duration::from_millis(1500);
+/// How often a pull goes back without progress before it gives up: the
+/// central went away, or did not subscribe to data.
+const PULL_STALLS: u32 = 4;
+/// How long a pull waits for the ack of file, and for done.
+const PULL_WAIT: Duration = Duration::from_secs(5);
 /// The last byte is in: the transfer task checks the file.
 static COMPLETE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
@@ -292,9 +317,9 @@ pub async fn window_change() {
     }
 }
 
-/// Whether a transfer is in progress.
+/// Whether a transfer is in progress, a push or a pull.
 pub fn busy() -> bool {
-    xfer().lock(|x| x.borrow().rx.busy())
+    PULLING.load(Ordering::Relaxed) || xfer().lock(|x| x.borrow().rx.busy())
 }
 
 /// How much of the incoming file is in, in percent; 0 without one.
@@ -325,22 +350,17 @@ fn now_ms() -> u64 {
 
 /// Queues an answer for the central.
 fn notify(out: Out) {
-    let Some(m) = out.msg() else {
-        return;
-    };
-    let mut buf = [0u8; MAX_CONTROL];
-    if let Ok(n) = m.encode(&mut buf) {
-        let mut v = heapless::Vec::new();
-        let _ = v.extend_from_slice(&buf[..n.min(CTRL)]);
-        let _ = OUT.try_send(v);
+    if let Some(m) = out.msg() {
+        send_ctrl(&m);
     }
 }
 
-/// Handles a write of ctrl.
-pub fn ctrl(data: &[u8]) {
+/// Handles a write of ctrl; mtu is the link's ATT MTU.
+pub fn ctrl(data: &[u8], mtu: u16) {
     let Some(m) = Msg::decode(data) else {
         return;
     };
+    let pulling = PULLING.load(Ordering::Relaxed);
     match m {
         Msg::Put { crc, .. } => {
             if !window_open() {
@@ -348,6 +368,14 @@ pub fn ctrl(data: &[u8]) {
                     code: code::WINDOW,
                     crc,
                     reason: "no update window",
+                });
+                return;
+            }
+            if pulling {
+                notify(Out::Error {
+                    code: code::BUSY,
+                    crc,
+                    reason: "busy",
                 });
                 return;
             }
@@ -360,13 +388,72 @@ pub fn ctrl(data: &[u8]) {
             });
             notify(out);
         }
-        Msg::Abort => abort(),
-        Msg::Get { .. } => notify(Out::Error {
-            code: code::KIND,
-            crc: 0,
-            reason: "no pulls yet",
-        }),
+        Msg::Get { kind, name } => match get(kind, name) {
+            Ok(src) => {
+                PULLING.store(true, Ordering::Relaxed);
+                PULL.signal((src, mtu));
+            }
+            Err(f) => notify(Out::Error {
+                code: f.code,
+                crc: 0,
+                reason: f.reason,
+            }),
+        },
+        Msg::Abort => {
+            if pulling {
+                to_pull(data);
+            }
+            abort();
+        }
+        Msg::Ack(_) | Msg::Rewind(_) | Msg::Done { .. } | Msg::Error { .. } if pulling => to_pull(data),
         _ => {}
+    }
+}
+
+/// Passes a message of the central to the pull.
+fn to_pull(data: &[u8]) {
+    let mut v = heapless::Vec::new();
+    if v.extend_from_slice(data).is_ok() {
+        let _ = PULL_IN.try_send(v);
+    }
+}
+
+/// What a pull sends.
+#[derive(Clone, Copy)]
+enum Source {
+    Config,
+    Script(Name),
+    List,
+}
+
+impl Source {
+    fn kind(self) -> Kind {
+        match self {
+            Source::Config => Kind::Config,
+            Source::Script(_) => Kind::Script,
+            Source::List => Kind::ScriptList,
+        }
+    }
+}
+
+/// Takes a get, or refuses it.
+fn get(kind: Kind, name: &str) -> Result<Source, Fail> {
+    if !window_open() {
+        return Err(Fail::new(code::WINDOW, "no update window"));
+    }
+    if busy() {
+        return Err(Fail::new(code::BUSY, "busy"));
+    }
+    if !knixx_xfer::valid_name(kind, name) {
+        return Err(Fail::new(code::NAME, "bad name"));
+    }
+    match kind {
+        Kind::Config => Ok(Source::Config),
+        Kind::ScriptList => Ok(Source::List),
+        Kind::Script => Name::new(name)
+            .map(Source::Script)
+            .ok_or(Fail::new(code::NAME, "bad name")),
+        Kind::Firmware => Err(Fail::new(code::KIND, "not given here")),
     }
 }
 
@@ -389,43 +476,241 @@ pub fn data(write: &[u8]) {
     }
 }
 
-/// Checks a complete file once its last ack went out: the board's side of
-/// the end of a transfer, outside the BLE task's write handler.
+/// The transfer task: checks a complete file once its last ack went out,
+/// outside the BLE task's write handler, and sends the files the central
+/// pulls.
 #[embassy_executor::task]
 pub async fn task() -> ! {
     loop {
-        COMPLETE.wait().await;
-        // Let the BLE task send the last ack before the check blocks.
-        let _ = with_timeout(Duration::from_millis(300), async {
-            while !OUT.is_empty() {
-                Timer::after_millis(10).await;
+        match embassy_futures::select::select(COMPLETE.wait(), PULL.wait()).await {
+            embassy_futures::select::Either::First(()) => complete().await,
+            embassy_futures::select::Either::Second((src, mtu)) => {
+                PULL_IN.clear();
+                if let Err((f, crc)) = pull(src, mtu).await {
+                    notify(Out::Error {
+                        code: f.code,
+                        crc,
+                        reason: f.reason,
+                    });
+                }
+                PULLING.store(false, Ordering::Relaxed);
             }
+        }
+    }
+}
+
+async fn complete() {
+    // Let the BLE task send the last ack before the check blocks.
+    let _ = with_timeout(Duration::from_millis(300), async {
+        while !OUT.is_empty() {
+            Timer::after_millis(10).await;
+        }
+    })
+    .await;
+    Timer::after_millis(20).await;
+    let out = xfer().lock(|x| {
+        let x = &mut *x.borrow_mut();
+        let out = x.rx.finish(&mut x.sink);
+        x.sink.last_error = match out {
+            Out::Error { code, .. } => code,
+            _ => 0,
+        };
+        out
+    });
+    notify(out);
+}
+
+/// Where a pull's bytes come from: a file, or the script list made for it.
+#[allow(clippy::large_enum_variant, reason = "one, in the transfer task")]
+enum Bytes {
+    File(heapless::String<64>),
+    Made(heapless::Vec<u8, { MAX_LIST as usize }>),
+}
+
+const NOT_FOUND: Fail = Fail::new(code::NOT_FOUND, "no such file");
+
+impl Bytes {
+    fn of(src: Source) -> Result<Bytes, Fail> {
+        Ok(match src {
+            Source::Config => {
+                let mut p = heapless::String::new();
+                let _ = p.push_str(knixx_storage::CONFIG_NAME);
+                Bytes::File(p)
+            }
+            Source::Script(name) => Bytes::File(script::path(name.as_str())),
+            Source::List => Bytes::Made(script_list()?),
         })
-        .await;
-        Timer::after_millis(20).await;
-        let out = xfer().lock(|x| {
-            let x = &mut *x.borrow_mut();
-            let out = x.rx.finish(&mut x.sink);
-            x.sink.last_error = match out {
-                Out::Error { code, .. } => code,
-                _ => 0,
-            };
-            out
+    }
+
+    /// Reads at off into buf.
+    fn read(&self, off: u32, buf: &mut [u8]) -> Result<usize, Fail> {
+        match self {
+            Bytes::File(p) => Fs.read_at(p, off, buf).map_err(|_| STORAGE),
+            Bytes::Made(v) => {
+                let rest = v.get(off as usize..).unwrap_or(&[]);
+                let n = rest.len().min(buf.len());
+                buf[..n].copy_from_slice(&rest[..n]);
+                Ok(n)
+            }
+        }
+    }
+
+    /// The size and the CRC.
+    fn measure(&self) -> Result<(u32, u32), Fail> {
+        if let Bytes::File(p) = self
+            && storage::file_size(p).map_err(|_| STORAGE)?.is_none()
+        {
+            return Err(NOT_FOUND);
+        }
+        let mut crc = Crc32::new();
+        let mut buf = [0u8; 256];
+        let mut size = 0u32;
+        loop {
+            let n = self.read(size, &mut buf)?;
+            if n == 0 {
+                return Ok((size, crc.finish()));
+            }
+            crc.update(&buf[..n]);
+            size += n as u32;
+        }
+    }
+}
+
+/// The scripts on the flash, one `<name> <size> <hash>` line each: the hash
+/// is the source's, as the script reports it in on_info, `-` when it is not
+/// loaded or has none.
+fn script_list() -> Result<heapless::Vec<u8, { MAX_LIST as usize }>, Fail> {
+    let mut out: heapless::String<{ MAX_LIST as usize }> = heapless::String::new();
+    let mut full = false;
+    storage::list_dir(script::DIR, |file, size| {
+        let Some(name) = file.strip_suffix(script::EXT) else {
+            return;
+        };
+        let mut hash: heapless::String<32> = heapless::String::new();
+        #[cfg(feature = "scripts")]
+        crate::runner::STATUS.lock(|st| {
+            if let Some(s) = st.borrow().iter().find(|s| s.name.as_str() == name) {
+                hash = s.info[5].clone();
+            }
         });
-        notify(out);
+        if hash.is_empty() || hash.contains(' ') {
+            hash.clear();
+            let _ = hash.push('-');
+        }
+        full |= writeln!(out, "{name} {size} {hash}").is_err();
+    })
+    .map_err(|_| STORAGE)?;
+    if full {
+        return Err(Fail::new(code::SIZE, "too many scripts"));
+    }
+    Ok(heapless::Vec::from_slice(out.as_bytes()).unwrap_or_default())
+}
+
+/// The central's next message in a pull, within wait.
+async fn pull_note(wait: Duration) -> Option<heapless::Vec<u8, CTRL>> {
+    with_timeout(wait, PULL_IN.receive()).await.ok()
+}
+
+/// Sends the file src to the central: file, then data in notifications of
+/// mtu − 3 bytes, until the central says done. On a failure, the reason
+/// and the CRC of the file (0 before file).
+async fn pull(src: Source, mtu: u16) -> Result<(), (Fail, u32)> {
+    let bytes = Bytes::of(src).map_err(|f| (f, 0))?;
+    let (size, crc) = bytes.measure().map_err(|f| (f, 0))?;
+    let name = match &src {
+        Source::Script(n) => n.as_str(),
+        _ => "",
+    };
+    let file = Msg::File {
+        kind: src.kind(),
+        size,
+        crc,
+        name,
+    };
+    send_ctrl(&file);
+    // The central acks 0 when it is ready; nothing comes when it did not
+    // subscribe to data, or went away.
+    match pull_note(PULL_WAIT).await.as_deref().and_then(Msg::decode) {
+        Some(Msg::Ack(0)) => {}
+        _ => return Ok(()),
+    }
+    let piece = (usize::from(mtu).saturating_sub(3).min(MAX_DATA) - DATA_HEADER).max(16) as u32;
+    let mut s = Sender::new(size, crc, 0, PULL_WINDOW, piece, PULL_STALLS);
+    let mut done_by = None;
+    loop {
+        while let Some((at, len)) = s.next_piece() {
+            let mut buf = [0u8; MAX_DATA];
+            let n = bytes
+                .read(at, &mut buf[DATA_HEADER..DATA_HEADER + len as usize])
+                .map_err(|f| (f, crc))?;
+            if n != len as usize {
+                return Err((STORAGE, crc));
+            }
+            let mut v = heapless::Vec::new();
+            let m = Msg::Data {
+                offset: at,
+                bytes: &buf[DATA_HEADER..DATA_HEADER + n],
+            };
+            let mut enc = [0u8; MAX_DATA];
+            let k = m.encode(&mut enc).map_err(|_| (STATE, crc))?;
+            let _ = v.extend_from_slice(&enc[..k]);
+            if with_timeout(Duration::from_secs(2), DATA_OUT.send(v))
+                .await
+                .is_err()
+            {
+                // The link is gone.
+                return Ok(());
+            }
+        }
+        if s.all_acked() && done_by.is_none() {
+            done_by = Some(Instant::now() + PULL_WAIT);
+        }
+        match pull_note(PULL_STALL).await {
+            Some(n) => match Msg::decode(&n) {
+                Some(Msg::Abort) => return Ok(()),
+                Some(m) => match s.on(&m) {
+                    Ok(Event::Done(_)) => return Ok(()),
+                    Ok(_) => {}
+                    // The central refused, or answered out of step: it
+                    // knows.
+                    Err(_) => return Ok(()),
+                },
+                None => {}
+            },
+            None => {
+                if done_by.is_some_and(|t| Instant::now() >= t) || s.silence().is_err() {
+                    return Ok(());
+                }
+            }
+        }
+    }
+}
+
+/// Queues a control message for the central.
+fn send_ctrl(m: &Msg) {
+    let mut buf = [0u8; MAX_CONTROL];
+    if let Ok(n) = m.encode(&mut buf) {
+        let mut v = heapless::Vec::new();
+        let _ = v.extend_from_slice(&buf[..n.min(CTRL)]);
+        let _ = OUT.try_send(v);
     }
 }
 
 /// Drops what was queued for an earlier central.
 pub fn reset() {
     OUT.clear();
+    DATA_OUT.clear();
 }
 
-/// Notifies the central of ctrl's answers until one fails.
+/// Notifies the central of ctrl's answers and a pull's data until one
+/// fails.
 pub async fn serve<P: PacketPool>(svc: &XferService, conn: &GattConnection<'_, '_, P>) {
     loop {
-        let n = OUT.receive().await;
-        if svc.ctrl.notify_raw(conn, &n, false).await.is_err() {
+        let r = match embassy_futures::select::select(OUT.receive(), DATA_OUT.receive()).await {
+            embassy_futures::select::Either::First(n) => svc.ctrl.notify_raw(conn, &n, false).await,
+            embassy_futures::select::Either::Second(d) => svc.data.notify_raw(conn, &d, false).await,
+        };
+        if r.is_err() {
             return;
         }
     }

@@ -131,6 +131,18 @@ fn resolve(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
+/// The md5 of the source at path (resolved as bytecode resolves it), as
+/// a build puts it in the script's on_info; None for bytecode, or a source
+/// that is not there.
+pub fn source_hash(path: &Path) -> Result<Option<String>> {
+    let path = resolve(path);
+    if path.extension().is_none_or(|e| e != "rhai") || !path.exists() {
+        return Ok(None);
+    }
+    let source = fs::read(&path).with_context(|| path.display().to_string())?;
+    Ok(Some(md5_hex(&source)))
+}
+
 /// The bytecode of path, built when it is a source, and the name of the
 /// script, from the file's name unless given. Without an extension, path is
 /// path.rhai, or else path.rhgn.

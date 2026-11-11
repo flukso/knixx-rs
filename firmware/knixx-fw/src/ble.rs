@@ -902,7 +902,8 @@ async fn events(stack: &'static Stack, server: &'static Server<'static>, conn: &
                 if let GattEvent::Write(w) = &event
                     && w.handle() == server.xfer.ctrl.handle
                 {
-                    w.with_data(|_, data| xfer_gatt::ctrl(data));
+                    let mtu = conn.raw().att_mtu();
+                    w.with_data(|_, data| xfer_gatt::ctrl(data, mtu));
                 }
                 if let GattEvent::Write(w) = &event
                     && w.handle() == server.xfer.data.handle

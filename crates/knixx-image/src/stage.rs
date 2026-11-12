@@ -13,9 +13,10 @@ use crate::{
     Crc32, HEADER_SIZE, Header, Keys, Refusal, STAGED_PATH, STAGED_TMP, Verifier, check_counter, check_size,
 };
 
-/// The bytes written to the file at a time: each append mounts the
-/// littlefs and finds the file's end, so fewer, larger ones are faster.
-pub const PIECE: usize = 16 * 1024;
+/// The bytes written to the file at a time, and read back at a time. The
+/// firmware keeps the file open between appends (knixx_storage::Session),
+/// so a piece need not be large: a sector is enough.
+pub const PIECE: usize = 4 * 1024;
 
 /// The space the littlefs keeps beyond the image, for the configuration,
 /// the scripts and the bonds to change meanwhile.

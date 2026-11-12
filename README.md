@@ -136,6 +136,7 @@ cargo xtask fw       # build, open the update window, push the image over BLE an
 cargo xtask flash-probe  # build and write the bootloader and the firmware over SWD; --probe
 cargo xtask term     # a terminal on the console, on USB, else BLE; --usb, --ble, --port, --addr
 cargo xtask cycle N  # build, then flash N times, checking USB and BLE after each
+cargo xtask hil      # build, flash, then the board tests through bolt, with the throughput; --no-flash, --probe, --port
 cargo xtask golden   # record the VL53L7CX golden log with ST's C driver; --check compares
 cargo xtask genfw    # extract the VL53L7CX firmware from ST's driver; --check compares
 cargo xtask cad      # the renders and the front plate: render, frontplate, readme, clean
@@ -361,6 +362,23 @@ cargo xtask cycle <n>
 builds once, then flashes `n` times; after each flash the board must report
 its version over USB and advertise over BLE.
 
+```
+cargo xtask hil [--no-flash] [--probe [<port>]] [--port <port>]
+```
+
+builds and flashes (over USB, or SWD with `--probe`), then tests the board
+through bolt, the way a user would. The board must be on USB, and in BLE
+range:
+- a firmware push of the same build, signed again with a higher counter,
+  then discarded;
+- a script push of 12.5 KB of bytecode, and its pull, compared;
+- a config pull, push and pull, compared.
+
+It prints a pass or a failure per step, and each push's rate twice: end to
+end, from bolt, and on the flash alone, from the board's own timing (`upload`
+shows the last push's). The table goes to `build/hil.log` too, with the
+commit, so that runs compare.
+
 ### Over BLE: the transfer service
 
 The firmware stages a new image while it runs, and the bootloader installs
@@ -403,7 +421,8 @@ It also takes and gives the per-board files, the scripts and the whole
   for a few seconds (the signature, the read-back) in a task of its own,
   and notifies `done` with the counter, or `error` with a code and a
   reason.
-- **Speed:** from a Mac, about 17 KiB/s, so the firmware takes 45 s.
+- **Speed:** from a Mac, about 21 KiB/s, so the firmware takes 36 s, half
+  of it on the flash; a script of 12 KB takes a second.
 - **A lost link** costs little: the board keeps what it has, and the next
   `bolt fw push` of the same image goes on from there.
 - **One transfer at a time** per board: a second request gets `busy`, but
@@ -629,7 +648,7 @@ pulled while a terminal was open, would stall every writer, the bus with
 | `ble [link \| forget all\|<address>]` | show the BLE settings and the bonded centrals, the active connection (`link`, see [Radio](#radio)), or forget bonds, see [Pairing](#pairing) |
 | `script [ls] \| info <name> \| rm <name>` | the scripts in `/scripts` with their state; what the board knows of one; remove one; `bolt script push` sends them, see [Scripts](#scripts) |
 | `fw [status \| install \| discard \| recovery]` | the firmware: what runs and what is staged (`bolt fw push` stages it); `install` resets into the bootloader to install it; `discard` removes it; `recovery` resets into the bootloader's USB recovery, see [Flashing](#over-ble-the-transfer-service) |
-| `upload [window <minutes> \| window off]` | the update window, in which the BLE transfer service takes and gives firmware, scripts and the config without pairing, see [Flashing](#over-ble-the-transfer-service) |
+| `upload [window <minutes> \| window off]` | the update window, in which the BLE transfer service takes and gives firmware, scripts and the config without pairing, see [Flashing](#over-ble-the-transfer-service); without arguments, also the last push's size and time, and its time on the flash |
 | `version` | the commit and build time of the firmware, `version <commit> built <date>`, also shown in the banner |
 | `sys` | the uptime, the stack high-water mark, the heap in use and at most, the scripts running and the telegrams dropped for them, the bytes queued and lost on the USB and BLE console outputs, and whether a USB terminal is open (DTR) |
 
@@ -1345,7 +1364,14 @@ one. None of these formats the flash: only the boot does, and only a blank
 one.
 
 At boot the firmware mounts the littlefs, writes the default configuration
-when there is no file, and shows what it did under the banner. A blank flash
+when there is no file, and shows what it did under the banner. The littlefs
+stays mounted from then on (a `Session`), and a file being received (a
+firmware image, a script) stays open from one append to the next. A mount
+per write would cost a mount, a scan of the whole filesystem for free blocks,
+a copy of the file's last block and a commit each time. Mounted, a firmware
+push is about a third faster, and a script push ten times. A file that was
+being received when the board reset is left at its size from before; the
+transfer starts over. A blank flash
 is formatted, but a flash that holds a littlefs that does not mount is left
 alone: the firmware falls back to the built-in default and blinks red.
 `config set` and `config init` save the file. The flash is driven in
@@ -1530,7 +1556,8 @@ cargo test
 ```
 
 runs the host tests, among them the VL53L7CX golden test, the littlefs
-tests on a NOR flash in RAM, and the scripts' tests: the template run step
+tests on a NOR flash in RAM (which also count the flash's work for a stream,
+mounted and per append), and the scripts' tests: the template run step
 by step, the state, the telegram, the sends and their limits, the errors
 returned rather than panics, the compiler's checks and the fault lines.
 `cargo xtask golden --check` checks the golden log against ST's C driver,

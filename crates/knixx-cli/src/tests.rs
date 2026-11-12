@@ -442,17 +442,26 @@ fn config_load_whole() {
 
     // Does not parse; refused by check; a full queue.
     let mut f = Fake::new(two_switches(0x7801), 0);
-    assert_eq!(config_load(&mut f, b"[device]\nindividual = x\n", false), Err(LoadError::Parse));
+    assert_eq!(
+        config_load(&mut f, b"[device]\nindividual = x\n", false),
+        Err(LoadError::Parse)
+    );
     assert_eq!(config_load(&mut f, file, false), Err(LoadError::QueueFull));
     f.cap = 4;
     f.no_knixx = Some("not built in");
     let knixx = b"[device]\nindividual = 7.8.1\n[A]\ngroup = 0/0/2\n[B]\ngroup = 0/0/3\n[ble]\nknixx = on\n";
-    assert_eq!(config_load(&mut f, knixx, false), Err(LoadError::Check("not built in")));
+    assert_eq!(
+        config_load(&mut f, knixx, false),
+        Err(LoadError::Check("not built in"))
+    );
     assert_eq!(f.dev, two_switches(0x7801));
     assert!(f.saved.is_none());
 
     // Applied, but not saved.
     f.err = Some("flash full");
-    assert_eq!(config_load(&mut f, file, false), Err(LoadError::Save("flash full")));
+    assert_eq!(
+        config_load(&mut f, file, false),
+        Err(LoadError::Save("flash full"))
+    );
     assert_eq!(f.dev.ble.tx_power, 4);
 }

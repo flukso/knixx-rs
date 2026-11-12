@@ -5,6 +5,6 @@
 extern crate std;
 
 pub mod lineedit;
+pub mod name;
 pub mod nus;
 pub mod outq;
-pub mod name;

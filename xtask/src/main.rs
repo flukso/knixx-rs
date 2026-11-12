@@ -10,6 +10,8 @@
 //!                  image over BLE and install it, with bolt fw push
 //!     term         a terminal on the board's console with bolt term
 //!     cycle        build, then flash n times, checking USB and BLE after each
+//!     hil          build, flash, then push and pull firmware, a script and
+//!                  the config through bolt, and measure the throughput
 //!     golden       record the VL53L7CX golden log with ST's C driver
 //!     genfw        extract the VL53L7CX firmware from ST's vl53l7cx_buffers.h
 //!     cad          the renders and the front plate, with the Python tools in cad/
@@ -19,6 +21,7 @@
 //! time, and with the public keys they take signed images from.
 
 mod cad;
+mod hil;
 
 use std::env;
 use std::fs;
@@ -69,6 +72,12 @@ tasks:
           vl53l7cx_buffers.h; --check only compares
   cad     render|frontplate|readme|clean: the renders and the front plate
           into build/cad/ [--step <model.step>, $PY]
+  hil     build and flash, then the board tests through bolt: a firmware
+          push (signed again with a higher counter, then discarded), a
+          script push and pull, a config pull, push and pull; prints the
+          throughput of each push and appends it to build/hil.log
+          [--port <serial port>] [--no-flash] [--probe [<GDB server port>]:
+          flash over SWD] [the build's flags]
   cycle   build, then flash <n> times; after each flash the board must
           report its version over USB and advertise as knixx over BLE
   web     serve the web app on localhost with trunk, rebuilt on changes;
@@ -132,6 +141,7 @@ fn main() -> Result<()> {
         Some("flash") => flash(features, &rest),
         Some("flash-probe") => flash_probe(features, &rest),
         Some("cycle") => cycle(features, &rest),
+        Some("hil") => hil::run(features, &rest),
         Some("golden") => golden(&args[1..]),
         Some("genfw") => genfw(&args[1..]),
         Some("cad") => cad::run(&args[1..]),

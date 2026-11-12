@@ -203,7 +203,7 @@ pub fn script(path: &Path, name: Option<&str>, always: bool, o: &Opts) -> Result
             return Ok(());
         }
         eprintln!("pushing script {name}: {} bytes", data.len());
-        l.put(Kind::Script, 0, &name, &data, |_| {}).await?;
+        put_shown(l, Kind::Script, 0, &name, &data).await?;
         eprintln!("the board took {name}");
         Ok(())
     })

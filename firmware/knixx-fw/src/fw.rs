@@ -120,6 +120,17 @@ fn window_status(w: &mut dyn Write) {
             let _ = writeln!(w, "upload: window shut");
         }
     }
+    if let Some(l) = crate::xfer_gatt::last() {
+        let secs = |d: embassy_time::Duration| d.as_millis() as f32 / 1000.0;
+        let _ = writeln!(
+            w,
+            "upload: last: {} {} B in {:.1} s, {:.1} s in flash",
+            l.kind,
+            l.bytes,
+            secs(l.total),
+            secs(l.flash)
+        );
+    }
 }
 
 fn status(w: &mut dyn Write) {

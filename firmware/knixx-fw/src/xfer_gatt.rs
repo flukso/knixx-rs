@@ -111,6 +111,7 @@ fn xfer() -> &'static Mutex<ThreadModeRawMutex, RefCell<Xfer>> {
             sink: AppSink {
                 into: Into::Nothing,
                 last_error: 0,
+                timing: None,
             },
         }))
     })
@@ -121,6 +122,35 @@ struct AppSink {
     into: Into,
     /// The code of the last failed file, 0 for none.
     last_error: u8,
+    /// The time of the push in progress.
+    timing: Option<Timing>,
+}
+
+/// The time of a push: since it opened, and inside the sink, where the
+/// flash works.
+struct Timing {
+    kind: &'static str,
+    bytes: u32,
+    start: Instant,
+    flash: Duration,
+}
+
+/// The last push the board took: its kind, bytes, time from the put to the
+/// check's end, and the part of it in the sink.
+#[derive(Clone, Copy)]
+pub struct Last {
+    pub kind: &'static str,
+    pub bytes: u32,
+    pub total: Duration,
+    pub flash: Duration,
+}
+
+static LAST: Mutex<CriticalSectionRawMutex, core::cell::Cell<Option<Last>>> =
+    Mutex::new(core::cell::Cell::new(None));
+
+/// The last push the board took, for the upload command.
+pub fn last() -> Option<Last> {
+    LAST.lock(|l| l.get())
 }
 
 /// The file being received.
@@ -214,6 +244,51 @@ fn stage_fail(e: StageError<FileError>) -> Fail {
 
 impl Sink for AppSink {
     fn open(&mut self, kind: Kind, name: &str, size: u32, flags: u8) -> Result<(), Fail> {
+        let t0 = Instant::now();
+        self.open_into(kind, name, size, flags)?;
+        self.timing = Some(Timing {
+            kind: kind.as_str(),
+            bytes: 0,
+            start: t0,
+            flash: Instant::now() - t0,
+        });
+        Ok(())
+    }
+
+    fn write(&mut self, data: &[u8]) -> Result<(), Fail> {
+        let t0 = Instant::now();
+        let r = self.write_into(data);
+        if let Some(t) = &mut self.timing {
+            t.flash += Instant::now() - t0;
+            t.bytes += data.len() as u32;
+        }
+        r
+    }
+
+    fn finish(&mut self) -> Result<u32, Fail> {
+        let t0 = Instant::now();
+        let r = self.finish_into();
+        if let (Ok(_), Some(t)) = (&r, self.timing.take()) {
+            let end = Instant::now();
+            let last = Last {
+                kind: t.kind,
+                bytes: t.bytes,
+                total: end - t.start,
+                flash: t.flash + (end - t0),
+            };
+            LAST.lock(|l| l.set(Some(last)));
+        }
+        r
+    }
+
+    fn abort(&mut self) {
+        self.timing = None;
+        self.abort_into();
+    }
+}
+
+impl AppSink {
+    fn open_into(&mut self, kind: Kind, name: &str, size: u32, flags: u8) -> Result<(), Fail> {
         self.abort();
         self.into = match kind {
             Kind::Firmware => Into::Firmware(Stager::begin(&mut Fs, size).map_err(stage_fail)?),
@@ -240,7 +315,7 @@ impl Sink for AppSink {
         Ok(())
     }
 
-    fn write(&mut self, data: &[u8]) -> Result<(), Fail> {
+    fn write_into(&mut self, data: &[u8]) -> Result<(), Fail> {
         match &mut self.into {
             Into::Nothing => Err(STATE),
             Into::Firmware(s) => {
@@ -260,7 +335,7 @@ impl Sink for AppSink {
         }
     }
 
-    fn finish(&mut self) -> Result<u32, Fail> {
+    fn finish_into(&mut self) -> Result<u32, Fail> {
         match core::mem::replace(&mut self.into, Into::Nothing) {
             Into::Nothing => Err(STATE),
             Into::Firmware(s) => match s.finish(&mut Fs, None) {
@@ -277,7 +352,7 @@ impl Sink for AppSink {
         }
     }
 
-    fn abort(&mut self) {
+    fn abort_into(&mut self) {
         match core::mem::replace(&mut self.into, Into::Nothing) {
             Into::Firmware(_) => {
                 let _ = Fs.remove(image::STAGED_TMP);

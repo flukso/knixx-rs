@@ -1,3 +1,5 @@
+use std::boxed::Box;
+use std::format;
 use std::string::{String, ToString};
 use std::vec;
 use std::vec::Vec;
@@ -6,14 +8,21 @@ use super::*;
 
 /// A NOR flash in RAM: erased bytes are 0xFF and writes can only clear
 /// bits, so a write over data that was not erased fails the test.
+/// It counts the bytes read and written and the sectors erased.
 struct RamFlash {
     data: Vec<u8>,
+    read: u64,
+    written: u64,
+    erased: u64,
 }
 
 impl RamFlash {
     fn blank() -> RamFlash {
         RamFlash {
             data: vec![0xFF; SECTOR_SIZE * SECTOR_COUNT],
+            read: 0,
+            written: 0,
+            erased: 0,
         }
     }
 }
@@ -24,6 +33,7 @@ impl BlockDevice for RamFlash {
     fn read(&mut self, off: u32, buf: &mut [u8]) -> Result<(), ()> {
         let off = off as usize;
         buf.copy_from_slice(&self.data[off..off + buf.len()]);
+        self.read += buf.len() as u64;
         Ok(())
     }
 
@@ -40,12 +50,14 @@ impl BlockDevice for RamFlash {
             );
             *cell &= b;
         }
+        self.written += data.len() as u64;
         Ok(())
     }
 
     fn erase_sector(&mut self, off: u32) -> Result<(), ()> {
         assert_eq!(off as usize % SECTOR_SIZE, 0, "unaligned erase at {off:#x}");
         self.data[off as usize..off as usize + SECTOR_SIZE].fill(0xFF);
+        self.erased += 1;
         Ok(())
     }
 }
@@ -258,4 +270,219 @@ fn append_needs_the_file_and_space_shrinks() {
     assert!(before - after >= 100_000, "{before} -> {after}");
     remove(&mut f, "/big").unwrap();
     assert_eq!(free(&mut f).unwrap(), before);
+}
+
+/// A firmware-sized test file.
+fn image(len: u32) -> Vec<u8> {
+    (0..len).map(|i| (i ^ (i >> 8) ^ (i >> 16)) as u8).collect()
+}
+
+#[test]
+fn session_streams_a_file() {
+    let mut f = formatted();
+    let mut s = Box::pin(Session::new(&mut f));
+    s.as_mut().mount().unwrap();
+    s.as_mut().mkdir("/fw").unwrap();
+    s.as_mut().create("/fw/update.tmp").unwrap();
+    // 800 KB in BLE-sized pieces, as they come.
+    let data = image(800_000);
+    let mut size = 0;
+    for piece in data.chunks(240) {
+        size = s.as_mut().append("/fw/update.tmp", piece).unwrap();
+    }
+    assert_eq!(size as usize, data.len());
+    // read_at closes the stream and reads it whole.
+    let mut back = vec![0u8; data.len()];
+    let mut off = 0;
+    while off < back.len() {
+        let n = s
+            .as_mut()
+            .read_at(
+                "/fw/update.tmp",
+                off as u32,
+                &mut back[off..(off + 4096).min(data.len())],
+            )
+            .unwrap();
+        assert!(n > 0);
+        off += n;
+    }
+    assert!(back == data);
+    s.as_mut().rename("/fw/update.tmp", "/fw/update.kfw").unwrap();
+    drop(s);
+    // Another session, as after a reset, sees it all.
+    assert_eq!(
+        stat(&mut f, "/fw/update.kfw", |e| e.map(|e| e.size)).unwrap(),
+        Some(800_000)
+    );
+}
+
+#[test]
+fn session_works_on_other_files_meanwhile() {
+    let mut f = formatted();
+    let mut s = Box::pin(Session::new(&mut f));
+    s.as_mut().mount().unwrap();
+    s.as_mut().create("/big").unwrap();
+    let data = image(50_000);
+    for (i, piece) in data.chunks(1000).enumerate() {
+        s.as_mut().append("/big", piece).unwrap();
+        // The config, the bonds and the scripts change during a push.
+        if i % 10 == 0 {
+            s.as_mut().mkdir("/bonds").unwrap();
+            s.as_mut().write_atomic("/bonds/list", &[i as u8; 100]).unwrap();
+            s.as_mut()
+                .save(format!("[device]\nindividual = 1.1.{i}\n").as_bytes())
+                .unwrap();
+            let mut buf = [0u8; 200];
+            assert_eq!(s.as_mut().read("/bonds/list", &mut buf).unwrap(), 100);
+            assert!(s.as_mut().free().unwrap() > 1_000_000);
+        }
+    }
+    // The stream is still the one open: stat closes it, and sees it whole.
+    assert_eq!(
+        s.as_mut().stat("/big", |e| e.map(|e| e.size)).unwrap(),
+        Some(50_000)
+    );
+    let mut back = vec![0u8; 50_000];
+    assert_eq!(s.as_mut().read("/big", &mut back).unwrap(), 50_000);
+    assert!(back == data);
+    drop(s);
+    let mut buf = [0u8; config::MAX_FILE];
+    let n = load(&mut f, &mut buf, &mut String::new()).unwrap();
+    assert_eq!(&buf[..n], b"[device]\nindividual = 1.1.40\n");
+}
+
+#[test]
+fn session_stream_ops_on_its_own_path() {
+    let mut f = formatted();
+    let mut s = Box::pin(Session::new(&mut f));
+    s.as_mut().mount().unwrap();
+    // remove of the open stream.
+    s.as_mut().create("/a").unwrap();
+    s.as_mut().append("/a", b"hello").unwrap();
+    assert!(s.as_mut().remove("/a").unwrap());
+    assert!(s.as_mut().stat("/a", |e| e.is_none()).unwrap());
+    assert!(s.as_mut().append("/a", b"x").unwrap_err().not_found());
+    // create over the open stream truncates it.
+    s.as_mut().create("/b").unwrap();
+    s.as_mut().append("/b", b"hello").unwrap();
+    s.as_mut().create("/b").unwrap();
+    assert_eq!(s.as_mut().append("/b", b"hi").unwrap(), 2);
+    // rename onto the open stream replaces it.
+    s.as_mut().create("/c").unwrap();
+    s.as_mut().append("/c", b"new").unwrap();
+    s.as_mut().append("/b", b"!").unwrap();
+    s.as_mut().rename("/c", "/b").unwrap();
+    let mut buf = [0u8; 8];
+    assert_eq!(s.as_mut().read("/b", &mut buf).unwrap(), 3);
+    assert_eq!(&buf[..3], b"new");
+    // Switching between files commits the one before.
+    s.as_mut().create("/d").unwrap();
+    s.as_mut().create("/e").unwrap();
+    s.as_mut().append("/d", b"dd").unwrap();
+    s.as_mut().append("/e", b"eee").unwrap();
+    s.as_mut().append("/d", b"d").unwrap();
+    s.as_mut().close_stream().unwrap();
+    assert_eq!(s.as_mut().stat("/d", |e| e.map(|e| e.size)).unwrap(), Some(3));
+    assert_eq!(s.as_mut().stat("/e", |e| e.map(|e| e.size)).unwrap(), Some(3));
+}
+
+#[test]
+fn session_reset_mid_stream() {
+    let mut f = formatted();
+    create(&mut f, "/fw.tmp").unwrap();
+    append(&mut f, "/fw.tmp", &[1; 10_000]).unwrap();
+    {
+        // A reset: the session is never dropped, so nothing is closed or
+        // unmounted.
+        let mut s = Box::pin(Session::new(&mut f));
+        s.as_mut().mount().unwrap();
+        s.as_mut().write_atomic("/other", b"kept").unwrap();
+        for _ in 0..50 {
+            s.as_mut().append("/fw.tmp", &[2; 1000]).unwrap();
+        }
+        core::mem::forget(s);
+    }
+    // The file has its committed size; what was committed meanwhile stays.
+    assert_eq!(
+        stat(&mut f, "/fw.tmp", |e| e.map(|e| e.size)).unwrap(),
+        Some(10_000)
+    );
+    let mut buf = [0u8; 8];
+    assert_eq!(read(&mut f, "/other", &mut buf).unwrap(), 4);
+    // And the filesystem takes a new stream.
+    create(&mut f, "/fw.tmp").unwrap();
+    append(&mut f, "/fw.tmp", &[3; 5000]).unwrap();
+    assert_eq!(
+        stat(&mut f, "/fw.tmp", |e| e.map(|e| e.size)).unwrap(),
+        Some(5000)
+    );
+}
+
+/// The flash bytes read and written, and the sectors erased, for each
+/// tenth of a stream of len bytes appended in pieces, through a session or
+/// with a mount per append.
+fn stream_cost(len: u32, piece: usize, session: bool) -> Vec<(u64, u64, u64)> {
+    let mut f = formatted();
+    create(&mut f, "/fw.tmp").unwrap();
+    let data = image(len);
+    let tenth = data.len().div_ceil(10);
+    let mut out = Vec::new();
+    let counts = |f: &RamFlash| (f.read, f.written, f.erased);
+    if session {
+        let mut s = Box::pin(Session::new(&mut f));
+        s.as_mut().mount().unwrap();
+        for part in data.chunks(tenth) {
+            let before = counts(s.dev);
+            for p in part.chunks(piece) {
+                s.as_mut().append("/fw.tmp", p).unwrap();
+            }
+            let after = counts(s.dev);
+            out.push((after.0 - before.0, after.1 - before.1, after.2 - before.2));
+        }
+        s.as_mut().close_stream().unwrap();
+    } else {
+        for part in data.chunks(tenth) {
+            let before = counts(&f);
+            for p in part.chunks(piece) {
+                append(&mut f, "/fw.tmp", p).unwrap();
+            }
+            let after = counts(&f);
+            out.push((after.0 - before.0, after.1 - before.1, after.2 - before.2));
+        }
+    }
+    assert_eq!(stat(&mut f, "/fw.tmp", |e| e.map(|e| e.size)).unwrap(), Some(len));
+    out
+}
+
+#[test]
+fn session_append_cost_stays_flat() {
+    // A firmware of 800 KB in 4 KiB pieces.
+    let len = 800_000;
+    let per_mount = stream_cost(len, 4096, false);
+    let session = stream_cost(len, 4096, true);
+    let small = stream_cost(len, 240, true);
+    let total = |v: &[(u64, u64, u64)]| v.iter().fold((0, 0, 0), |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2));
+    std::println!("bytes read, written, sectors erased for {len} bytes:");
+    std::println!("  mount per 4 KiB append: {:?}", total(&per_mount));
+    std::println!("  session, 4 KiB appends: {:?}", total(&session));
+    std::println!("  session, 240 B appends: {:?}", total(&small));
+    std::println!(
+        "  reads per tenth, mount per append: {:?}",
+        per_mount.iter().map(|c| c.0).collect::<Vec<_>>()
+    );
+    std::println!(
+        "  reads per tenth, session:          {:?}",
+        session.iter().map(|c| c.0).collect::<Vec<_>>()
+    );
+    // A mount per append reads more and more as the file grows; a session
+    // reads about the same for each tenth.
+    assert!(per_mount[9].0 > per_mount[0].0 * 3 / 2, "{per_mount:?}");
+    let max = session.iter().map(|c| c.0).max().unwrap();
+    let min = session.iter().map(|c| c.0).min().unwrap();
+    assert!(max <= 2 * min.max(4096), "{session:?}");
+    // And far less overall, in reads and in writes.
+    assert!(total(&session).0 * 10 < total(&per_mount).0);
+    assert!(total(&session).1 < total(&per_mount).1);
+    // Small pieces cost no more flash work than large ones.
+    assert!(total(&small).1 <= total(&session).1 + 4096);
 }
